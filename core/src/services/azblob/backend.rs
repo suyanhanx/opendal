@@ -20,11 +20,11 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bytes::Buf;
 use http::header::CONTENT_TYPE;
+use http::Response;
 use http::StatusCode;
 use log::debug;
 use reqsign::AzureStorageConfig;
@@ -39,7 +39,6 @@ use super::lister::AzblobLister;
 use super::writer::AzblobWriter;
 use crate::raw::*;
 use crate::services::azblob::core::AzblobCore;
-use crate::services::azblob::reader::AzblobReader;
 use crate::services::azblob::writer::AzblobWriters;
 use crate::*;
 
@@ -440,16 +439,24 @@ impl Builder for AzblobBuilder {
             })?
         };
 
-        let config_loader = AzureStorageConfig {
-            account_name: self
-                .config
-                .account_name
-                .clone()
-                .or_else(|| infer_storage_name_from_endpoint(endpoint.as_str())),
-            account_key: self.config.account_key.clone(),
-            sas_token: self.config.sas_token.clone(),
-            ..Default::default()
-        };
+        let mut config_loader = AzureStorageConfig::default().from_env();
+
+        if let Some(v) = self
+            .config
+            .account_name
+            .clone()
+            .or_else(|| infer_storage_name_from_endpoint(endpoint.as_str()))
+        {
+            config_loader.account_name = Some(v);
+        }
+
+        if let Some(v) = self.config.account_key.clone() {
+            config_loader.account_key = Some(v);
+        }
+
+        if let Some(v) = self.config.sas_token.clone() {
+            config_loader.sas_token = Some(v);
+        }
 
         let encryption_key =
             match &self.config.encryption_key {
@@ -542,10 +549,8 @@ pub struct AzblobBackend {
     has_sas_token: bool,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Accessor for AzblobBackend {
-    type Reader = AzblobReader;
+impl Access for AzblobBackend {
+    type Reader = HttpBody;
     type Writer = AzblobWriters;
     type Lister = oio::PageLister<AzblobLister>;
     type BlockingReader = ();
@@ -608,10 +613,17 @@ impl Accessor for AzblobBackend {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            AzblobReader::new(self.core.clone(), path, args),
-        ))
+        let resp = self.core.azblob_get_blob(path, args.range(), &args).await?;
+
+        let status = resp.status();
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => Ok((RpRead::new(), resp.into_body())),
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -619,7 +631,11 @@ impl Accessor for AzblobBackend {
         let w = if args.append() {
             AzblobWriters::Two(oio::AppendWriter::new(w))
         } else {
-            AzblobWriters::One(oio::BlockWriter::new(w, args.concurrent()))
+            AzblobWriters::One(oio::BlockWriter::new(
+                w,
+                args.executor().cloned(),
+                args.concurrent(),
+            ))
         };
 
         Ok((RpWrite::default(), w))
@@ -713,7 +729,7 @@ impl Accessor for AzblobBackend {
             .map_err(|e| {
                 Error::new(
                     ErrorKind::Unexpected,
-                    &format!("get invalid CONTENT_TYPE header in response: {:?}", e),
+                    format!("get invalid CONTENT_TYPE header in response: {:?}", e),
                 )
             })?;
         let splits = content_type.split("boundary=").collect::<Vec<&str>>();

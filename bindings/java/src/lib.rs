@@ -23,7 +23,6 @@ use jni::sys::jboolean;
 use jni::sys::jint;
 use jni::sys::jlong;
 use jni::JNIEnv;
-
 use opendal::raw::PresignedRequest;
 use opendal::Capability;
 use opendal::Entry;
@@ -32,12 +31,14 @@ use opendal::Metadata;
 use opendal::Metakey;
 use opendal::OperatorInfo;
 
-mod blocking_operator;
+mod async_operator;
 mod convert;
 mod error;
 mod executor;
 mod layer;
 mod operator;
+mod operator_input_stream;
+mod operator_output_stream;
 mod utility;
 
 pub(crate) type Result<T> = std::result::Result<T, error::Error>;

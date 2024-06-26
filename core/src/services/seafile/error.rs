@@ -35,7 +35,6 @@ pub async fn parse_error(resp: Response<Buffer>) -> Result<Error> {
     let bs = body.copy_to_bytes(body.remaining());
 
     let (kind, _retryable) = match parts.status.as_u16() {
-        400 => (ErrorKind::InvalidInput, false),
         403 => (ErrorKind::PermissionDenied, false),
         404 => (ErrorKind::NotFound, false),
         520 => (ErrorKind::Unexpected, false),
@@ -46,7 +45,7 @@ pub async fn parse_error(resp: Response<Buffer>) -> Result<Error> {
         .map(|seafile_err| (format!("{seafile_err:?}"), Some(seafile_err)))
         .unwrap_or_else(|_| (String::from_utf8_lossy(&bs).into_owned(), None));
 
-    let mut err = Error::new(kind, &message);
+    let mut err = Error::new(kind, message);
 
     err = with_error_response_context(err, parts);
 

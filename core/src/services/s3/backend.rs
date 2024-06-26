@@ -23,10 +23,10 @@ use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bytes::Buf;
+use http::Response;
 use http::StatusCode;
 use log::debug;
 use log::warn;
@@ -45,7 +45,6 @@ use super::core::*;
 use super::error::parse_error;
 use super::error::parse_s3_error_code;
 use super::lister::S3Lister;
-use super::reader::S3Reader;
 use super::writer::S3Writer;
 use super::writer::S3Writers;
 use crate::raw::*;
@@ -1019,10 +1018,8 @@ pub struct S3Backend {
     core: Arc<S3Core>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Accessor for S3Backend {
-    type Reader = S3Reader;
+impl Access for S3Backend {
+    type Reader = HttpBody;
     type Writer = S3Writers;
     type Lister = oio::PageLister<S3Lister>;
     type BlockingReader = ();
@@ -1097,22 +1094,32 @@ impl Accessor for S3Backend {
 
         match status {
             StatusCode::OK => parse_into_metadata(path, resp.headers()).map(RpStat::new),
-            _ => Err(parse_error(resp).await?),
+            _ => Err(parse_error(resp)),
         }
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            S3Reader::new(self.core.clone(), path, args),
-        ))
+        let resp = self.core.s3_get_object(path, args.range(), &args).await?;
+
+        let status = resp.status();
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => {
+                Ok((RpRead::default(), resp.into_body()))
+            }
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)))
+            }
+        }
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
         let concurrent = args.concurrent();
+        let executor = args.executor().cloned();
         let writer = S3Writer::new(self.core.clone(), path, args);
 
-        let w = oio::MultipartWriter::new(writer, concurrent);
+        let w = oio::MultipartWriter::new(writer, executor, concurrent);
 
         Ok((RpWrite::default(), w))
     }
@@ -1133,7 +1140,7 @@ impl Accessor for S3Backend {
             // This is not a standard behavior, only some s3 alike service like GCS XML API do this.
             // ref: <https://cloud.google.com/storage/docs/xml-api/delete-object>
             StatusCode::NOT_FOUND => Ok(RpDelete::default()),
-            _ => Err(parse_error(resp).await?),
+            _ => Err(parse_error(resp)),
         }
     }
 
@@ -1155,7 +1162,7 @@ impl Accessor for S3Backend {
 
         match status {
             StatusCode::OK => Ok(RpCopy::default()),
-            _ => Err(parse_error(resp).await?),
+            _ => Err(parse_error(resp)),
         }
     }
 
@@ -1230,7 +1237,7 @@ impl Accessor for S3Backend {
 
             Ok(RpBatch::new(batched_result))
         } else {
-            Err(parse_error(resp).await?)
+            Err(parse_error(resp))
         }
     }
 }

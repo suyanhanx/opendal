@@ -19,10 +19,10 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::io;
+use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures::AsyncWriteExt;
 use log::debug;
 use serde::Deserialize;
@@ -244,12 +244,11 @@ pub struct HdfsBackend {
 unsafe impl Send for HdfsBackend {}
 unsafe impl Sync for HdfsBackend {}
 
-#[async_trait]
-impl Accessor for HdfsBackend {
-    type Reader = HdfsReader;
+impl Access for HdfsBackend {
+    type Reader = HdfsReader<hdrs::AsyncFile>;
     type Writer = HdfsWriter<hdrs::AsyncFile>;
     type Lister = Option<HdfsLister>;
-    type BlockingReader = HdfsReader;
+    type BlockingReader = HdfsReader<hdrs::File>;
     type BlockingWriter = HdfsWriter<hdrs::File>;
     type BlockingLister = Option<HdfsLister>;
 
@@ -306,30 +305,29 @@ impl Accessor for HdfsBackend {
         Ok(RpStat::new(m))
     }
 
-    async fn read(&self, path: &str, _: OpRead) -> Result<(RpRead, Self::Reader)> {
+    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
         let p = build_rooted_abs_path(&self.root, path);
 
         let client = self.client.clone();
-        let f = match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => runtime
-                .spawn_blocking(move || {
-                    client
-                        .open_file()
-                        .read(true)
-                        .open(&p)
-                        .map_err(new_std_io_error)
-                })
-                .await
-                .map_err(|err| {
-                    Error::new(ErrorKind::Unexpected, "tokio spawn io task failed").set_source(err)
-                })?,
-            Err(_) => Err(Error::new(
-                ErrorKind::Unexpected,
-                "no tokio runtime found, failed to run io task",
-            )),
-        }?;
+        let mut f = client
+            .open_file()
+            .read(true)
+            .async_open(&p)
+            .await
+            .map_err(new_std_io_error)?;
 
-        Ok((RpRead::new(), HdfsReader::new(f)))
+        if args.range().offset() != 0 {
+            use futures::AsyncSeekExt;
+
+            f.seek(SeekFrom::Start(args.range().offset()))
+                .await
+                .map_err(new_std_io_error)?;
+        }
+
+        Ok((
+            RpRead::new(),
+            HdfsReader::new(f, args.range().size().unwrap_or(u64::MAX) as _),
+        ))
     }
 
     async fn write(&self, path: &str, op: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -508,17 +506,27 @@ impl Accessor for HdfsBackend {
         Ok(RpStat::new(m))
     }
 
-    fn blocking_read(&self, path: &str, _: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
+    fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
         let p = build_rooted_abs_path(&self.root, path);
 
-        let f = self
+        let mut f = self
             .client
             .open_file()
             .read(true)
             .open(&p)
             .map_err(new_std_io_error)?;
 
-        Ok((RpRead::new(), HdfsReader::new(f)))
+        if args.range().offset() != 0 {
+            use std::io::Seek;
+
+            f.seek(SeekFrom::Start(args.range().offset()))
+                .map_err(new_std_io_error)?;
+        }
+
+        Ok((
+            RpRead::new(),
+            HdfsReader::new(f, args.range().size().unwrap_or(u64::MAX) as _),
+        ))
     }
 
     fn blocking_write(&self, path: &str, op: OpWrite) -> Result<(RpWrite, Self::BlockingWriter)> {

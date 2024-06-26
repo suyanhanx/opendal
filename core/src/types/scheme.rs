@@ -32,6 +32,8 @@ use crate::Error;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Scheme {
+    /// [aliyun_drive][crate::services::AliyunDrive]: Aliyun Drive services.
+    AliyunDrive,
     /// [atomicserver][crate::services::Atomicserver]: Atomicserver services.
     Atomicserver,
     /// [azblob][crate::services::Azblob]: Azure Storage Blob services.
@@ -86,7 +88,7 @@ pub enum Scheme {
     Http,
     /// [huggingface][crate::services::Huggingface]: Huggingface services.
     Huggingface,
-    /// [alluxio][created::services::Alluxio]: Alluxio services.
+    /// [alluxio][crate::services::Alluxio]: Alluxio services.
     Alluxio,
 
     /// [ipmfs][crate::services::Ipfs]: IPFS HTTP Gateway
@@ -145,19 +147,19 @@ pub enum Scheme {
     Webhdfs,
     /// [redb][crate::services::Redb]: Redb Services
     Redb,
-    /// [tikv][crate::services::tikv]: Tikv Services
+    /// [tikv][crate::services::Tikv]: Tikv Services
     Tikv,
-    /// [azfile][crate::services::azfile]: Azfile Services
+    /// [azfile][crate::services::Azfile]: Azfile Services
     Azfile,
-    /// [mongodb](crate::services::mongodb): MongoDB Services
+    /// [mongodb](crate::services::Mongodb): MongoDB Services
     Mongodb,
-    /// [gridfs](crate::services::gridfs): MongoDB Gridfs Services
+    /// [gridfs](crate::services::Gridfs): MongoDB Gridfs Services
     Gridfs,
     /// [Github Contents][crate::services::Github]: Github contents support.
     Github,
-    /// [Native HDFS](crate::services::hdfs_native): Hdfs Native service, using rust hdfs-native client for hdfs
+    /// [Native HDFS](crate::services::HdfsNative): Hdfs Native service, using rust hdfs-native client for hdfs
     HdfsNative,
-    /// [surrealdb](crate::services::surrealdb): Surrealdb Services
+    /// [surrealdb](crate::services::Surrealdb): Surrealdb Services
     Surrealdb,
     /// Custom that allow users to implement services outside of OpenDAL.
     ///
@@ -191,6 +193,8 @@ impl Scheme {
     /// ```
     pub fn enabled() -> HashSet<Scheme> {
         HashSet::from([
+            #[cfg(feature = "services-aliyun-drive")]
+            Scheme::AliyunDrive,
             #[cfg(feature = "services-atomicserver")]
             Scheme::Atomicserver,
             #[cfg(feature = "services-alluxio")]
@@ -325,6 +329,7 @@ impl FromStr for Scheme {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.to_lowercase();
         match s.as_str() {
+            "aliyun_drive" => Ok(Scheme::AliyunDrive),
             "atomicserver" => Ok(Scheme::Atomicserver),
             "azblob" => Ok(Scheme::Azblob),
             "alluxio" => Ok(Scheme::Alluxio),
@@ -399,6 +404,7 @@ impl FromStr for Scheme {
 impl From<Scheme> for &'static str {
     fn from(v: Scheme) -> Self {
         match v {
+            Scheme::AliyunDrive => "aliyun_drive",
             Scheme::Atomicserver => "atomicserver",
             Scheme::Azblob => "azblob",
             Scheme::Azdls => "azdls",

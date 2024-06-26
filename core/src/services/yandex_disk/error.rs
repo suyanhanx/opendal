@@ -38,7 +38,6 @@ pub async fn parse_error(resp: Response<Buffer>) -> Result<Error> {
     let bs = body.copy_to_bytes(body.remaining());
 
     let (kind, retryable) = match parts.status.as_u16() {
-        400 => (ErrorKind::InvalidInput, false),
         410 | 403 => (ErrorKind::PermissionDenied, false),
         404 => (ErrorKind::NotFound, false),
         // We should retry it when we get 423 error.
@@ -52,7 +51,7 @@ pub async fn parse_error(resp: Response<Buffer>) -> Result<Error> {
         .map(|yandex_disk_err| (format!("{yandex_disk_err:?}"), Some(yandex_disk_err)))
         .unwrap_or_else(|_| (String::from_utf8_lossy(&bs).into_owned(), None));
 
-    let mut err = Error::new(kind, &message);
+    let mut err = Error::new(kind, message);
 
     err = with_error_response_context(err, parts);
 

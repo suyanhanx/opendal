@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use async_trait::async_trait;
 use mysql_async::prelude::*;
 use mysql_async::Opts;
 use mysql_async::Pool;
@@ -78,7 +77,7 @@ impl MysqlBuilder {
     ///
     /// ## Url
     ///
-    /// This format resembles the url format of the mysql client. The format is: [scheme://][user[:[password]]@]host[:port][/schema][?attribute1=value1&attribute2=value2...
+    /// This format resembles the url format of the mysql client. The format is: `[scheme://][user[:[password]]@]host[:port][/schema][?attribute1=value1&attribute2=value2...`
     ///
     /// - `mysql://user@localhost`
     /// - `mysql://user:password@localhost`
@@ -220,7 +219,6 @@ impl Debug for Adapter {
     }
 }
 
-#[async_trait]
 impl kv::Adapter for Adapter {
     fn metadata(&self) -> kv::Metadata {
         kv::Metadata::new(

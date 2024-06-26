@@ -108,7 +108,7 @@ impl DropboxCore {
             serde_json::from_reader(body.reader()).map_err(new_json_deserialize_error)?;
 
         // Update signer after token refreshed.
-        signer.access_token = token.access_token.clone();
+        signer.access_token.clone_from(&token.access_token);
 
         // Refresh it 2 minutes earlier.
         signer.expires_in = Utc::now()
@@ -129,7 +129,7 @@ impl DropboxCore {
         path: &str,
         range: BytesRange,
         _: &OpRead,
-    ) -> Result<Response<Buffer>> {
+    ) -> Result<Response<HttpBody>> {
         let url: String = "https://content.dropboxapi.com/2/files/download".to_string();
         let download_args = DropboxDownloadArgs {
             path: build_rooted_abs_path(&self.root, path),
@@ -148,7 +148,7 @@ impl DropboxCore {
         let mut request = req.body(Buffer::new()).map_err(new_request_build_error)?;
 
         self.sign(&mut request).await?;
-        self.client.send(request).await
+        self.client.fetch(request).await
     }
 
     pub async fn dropbox_update(
@@ -261,7 +261,7 @@ impl DropboxCore {
             }
             _ => Err(Error::new(
                 ErrorKind::Unexpected,
-                &format!(
+                format!(
                     "delete batch check failed with unexpected tag {}",
                     decoded_response.tag
                 ),

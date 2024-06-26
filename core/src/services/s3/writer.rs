@@ -21,7 +21,7 @@ use bytes::Buf;
 use http::StatusCode;
 
 use super::core::*;
-use super::error::parse_error;
+use super::error::{from_s3_error, parse_error, S3Error};
 use crate::raw::*;
 use crate::*;
 
@@ -58,7 +58,7 @@ impl oio::MultipartWrite for S3Writer {
 
         match status {
             StatusCode::CREATED | StatusCode::OK => Ok(()),
-            _ => Err(parse_error(resp).await?),
+            _ => Err(parse_error(resp)),
         }
     }
 
@@ -79,7 +79,7 @@ impl oio::MultipartWrite for S3Writer {
 
                 Ok(result.upload_id)
             }
-            _ => Err(parse_error(resp).await?),
+            _ => Err(parse_error(resp)),
         }
     }
 
@@ -93,9 +93,16 @@ impl oio::MultipartWrite for S3Writer {
         // AWS S3 requires part number must between [1..=10000]
         let part_number = part_number + 1;
 
-        let mut req =
-            self.core
-                .s3_upload_part_request(&self.path, upload_id, part_number, size, body)?;
+        let checksum = self.core.calculate_checksum(&body);
+
+        let mut req = self.core.s3_upload_part_request(
+            &self.path,
+            upload_id,
+            part_number,
+            size,
+            body,
+            checksum.clone(),
+        )?;
 
         self.core.sign(&mut req).await?;
 
@@ -114,18 +121,32 @@ impl oio::MultipartWrite for S3Writer {
                     })?
                     .to_string();
 
-                Ok(oio::MultipartPart { part_number, etag })
+                Ok(oio::MultipartPart {
+                    part_number,
+                    etag,
+                    checksum,
+                })
             }
-            _ => Err(parse_error(resp).await?),
+            _ => Err(parse_error(resp)),
         }
     }
 
     async fn complete_part(&self, upload_id: &str, parts: &[oio::MultipartPart]) -> Result<()> {
         let parts = parts
             .iter()
-            .map(|p| CompleteMultipartUploadRequestPart {
-                part_number: p.part_number,
-                etag: p.etag.clone(),
+            .map(|p| match &self.core.checksum_algorithm {
+                None => CompleteMultipartUploadRequestPart {
+                    part_number: p.part_number,
+                    etag: p.etag.clone(),
+                    ..Default::default()
+                },
+                Some(checksum_algorithm) => match checksum_algorithm {
+                    ChecksumAlgorithm::Crc32c => CompleteMultipartUploadRequestPart {
+                        part_number: p.part_number,
+                        etag: p.etag.clone(),
+                        checksum_crc32c: p.checksum.clone(),
+                    },
+                },
             })
             .collect();
 
@@ -137,8 +158,19 @@ impl oio::MultipartWrite for S3Writer {
         let status = resp.status();
 
         match status {
-            StatusCode::OK => Ok(()),
-            _ => Err(parse_error(resp).await?),
+            StatusCode::OK => {
+                // still check if there is any error because S3 might return error for status code 200
+                // https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html#API_CompleteMultipartUpload_Example_4
+                let (parts, body) = resp.into_parts();
+                let maybe_error: S3Error =
+                    quick_xml::de::from_reader(body.reader()).map_err(new_xml_deserialize_error)?;
+                if !maybe_error.code.is_empty() {
+                    return Err(from_s3_error(maybe_error, parts));
+                }
+
+                Ok(())
+            }
+            _ => Err(parse_error(resp)),
         }
     }
 
@@ -150,7 +182,7 @@ impl oio::MultipartWrite for S3Writer {
         match resp.status() {
             // s3 returns code 204 if abort succeeds.
             StatusCode::NO_CONTENT => Ok(()),
-            _ => Err(parse_error(resp).await?),
+            _ => Err(parse_error(resp)),
         }
     }
 }

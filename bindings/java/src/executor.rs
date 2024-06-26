@@ -19,9 +19,11 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::future::Future;
 
-use jni::objects::{JClass, JObject};
+use jni::objects::JClass;
+use jni::objects::JObject;
 use jni::sys::jlong;
-use jni::{JNIEnv, JavaVM};
+use jni::JNIEnv;
+use jni::JavaVM;
 use once_cell::sync::OnceCell;
 use tokio::task::JoinHandle;
 
@@ -29,7 +31,7 @@ use crate::Result;
 
 static mut RUNTIME: OnceCell<Executor> = OnceCell::new();
 thread_local! {
-    static ENV: RefCell<Option<*mut jni::sys::JNIEnv>> = RefCell::new(None);
+    static ENV: RefCell<Option<*mut jni::sys::JNIEnv>> = const { RefCell::new(None) };
 }
 
 /// # Safety

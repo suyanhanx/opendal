@@ -21,7 +21,8 @@ use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
 
-use futures::{AsyncWrite, SinkExt};
+use futures::AsyncWrite;
+use futures::SinkExt;
 
 use crate::raw::*;
 use crate::*;
@@ -113,6 +114,10 @@ mod tests {
     use super::*;
     use crate::raw::MaybeSend;
 
-    trait AssertTrait: Unpin + MaybeSend + Sync + 'static {}
-    impl AssertTrait for FuturesAsyncWriter {}
+    #[test]
+    fn test_trait() {
+        let v = FuturesAsyncWriter::new(Box::new(()));
+
+        let _: Box<dyn Unpin + MaybeSend + Sync + 'static> = Box::new(v);
+    }
 }

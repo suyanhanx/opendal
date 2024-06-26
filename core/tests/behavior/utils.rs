@@ -17,7 +17,6 @@
 
 use std::mem;
 use std::sync::Mutex;
-use std::usize;
 
 use futures::Future;
 use libtest_mimic::Failed;
@@ -107,6 +106,12 @@ macro_rules! blocking_trials {
 
 pub struct Fixture {
     pub paths: Mutex<Vec<String>>,
+}
+
+impl Default for Fixture {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Fixture {

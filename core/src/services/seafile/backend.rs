@@ -20,7 +20,8 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use http::Response;
+use http::StatusCode;
 use log::debug;
 use serde::Deserialize;
 use tokio::sync::RwLock;
@@ -28,12 +29,12 @@ use tokio::sync::RwLock;
 use super::core::parse_dir_detail;
 use super::core::parse_file_detail;
 use super::core::SeafileCore;
+use super::error::parse_error;
 use super::lister::SeafileLister;
 use super::writer::SeafileWriter;
 use super::writer::SeafileWriters;
 use crate::raw::*;
 use crate::services::seafile::core::SeafileSigner;
-use crate::services::seafile::reader::SeafileReader;
 use crate::*;
 
 /// Config for backblaze seafile services support.
@@ -253,9 +254,8 @@ pub struct SeafileBackend {
     core: Arc<SeafileCore>,
 }
 
-#[async_trait]
-impl Accessor for SeafileBackend {
-    type Reader = SeafileReader;
+impl Access for SeafileBackend {
+    type Reader = HttpBody;
     type Writer = SeafileWriters;
     type Lister = oio::PageLister<SeafileLister>;
     type BlockingReader = ();
@@ -302,10 +302,20 @@ impl Accessor for SeafileBackend {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            SeafileReader::new(self.core.clone(), path, args),
-        ))
+        let resp = self.core.download_file(path, args.range()).await?;
+
+        let status = resp.status();
+
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => {
+                Ok((RpRead::default(), resp.into_body()))
+            }
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -316,7 +326,7 @@ impl Accessor for SeafileBackend {
     }
 
     async fn delete(&self, path: &str, _args: OpDelete) -> Result<RpDelete> {
-        let _ = self.core.delete(path).await?;
+        self.core.delete(path).await?;
 
         Ok(RpDelete::default())
     }

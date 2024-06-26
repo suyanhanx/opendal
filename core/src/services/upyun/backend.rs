@@ -20,7 +20,7 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use http::Response;
 use http::StatusCode;
 use log::debug;
 use serde::Deserialize;
@@ -33,7 +33,6 @@ use super::writer::UpyunWriter;
 use super::writer::UpyunWriters;
 use crate::raw::*;
 use crate::services::upyun::core::UpyunSigner;
-use crate::services::upyun::reader::UpyunReader;
 use crate::*;
 
 /// Config for backblaze upyun services support.
@@ -232,9 +231,8 @@ pub struct UpyunBackend {
     core: Arc<UpyunCore>,
 }
 
-#[async_trait]
-impl Accessor for UpyunBackend {
-    type Reader = UpyunReader;
+impl Access for UpyunBackend {
+    type Reader = HttpBody;
     type Writer = UpyunWriters;
     type Lister = oio::PageLister<UpyunLister>;
     type BlockingReader = ();
@@ -298,17 +296,28 @@ impl Accessor for UpyunBackend {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            UpyunReader::new(self.core.clone(), path, args),
-        ))
+        let resp = self.core.download_file(path, args.range()).await?;
+
+        let status = resp.status();
+
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => {
+                Ok((RpRead::default(), resp.into_body()))
+            }
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
         let concurrent = args.concurrent();
+        let executor = args.executor().cloned();
         let writer = UpyunWriter::new(self.core.clone(), args, path.to_string());
 
-        let w = oio::MultipartWriter::new(writer, concurrent);
+        let w = oio::MultipartWriter::new(writer, executor, concurrent);
 
         Ok((RpWrite::default(), w))
     }

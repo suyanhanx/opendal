@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 
-use async_trait::async_trait;
 use rusqlite::params;
 use rusqlite::Connection;
 use serde::Deserialize;
@@ -40,7 +39,7 @@ pub struct SqliteConfig {
     ///
     /// ## Url
     ///
-    /// This format resembles the url format of the sqlite client. The format is: file://[path]?flag
+    /// This format resembles the url format of the sqlite client. The format is: `file://[path]?flag`
     ///
     /// - `file://data.db`
     ///
@@ -99,7 +98,7 @@ impl SqliteBuilder {
     ///
     /// ## Url
     ///
-    /// This format resembles the url format of the sqlite client. The format is: file://[path]?flag
+    /// This format resembles the url format of the sqlite client. The format is: `file://[path]?flag`
     ///
     /// - `file://data.db`
     ///
@@ -252,7 +251,6 @@ impl Debug for Adapter {
     }
 }
 
-#[async_trait]
 impl kv::Adapter for Adapter {
     fn metadata(&self) -> kv::Metadata {
         kv::Metadata::new(

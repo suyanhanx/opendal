@@ -15,8 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use async_trait::async_trait;
 use await_tree::InstrumentAwait;
+use futures::{Future, FutureExt};
+use oio::{ListOperation, ReadOperation, WriteOperation};
 
 use crate::raw::*;
 use crate::*;
@@ -53,29 +54,27 @@ impl AwaitTreeLayer {
     }
 }
 
-impl<A: Accessor> Layer<A> for AwaitTreeLayer {
-    type LayeredAccessor = AwaitTreeAccessor<A>;
+impl<A: Access> Layer<A> for AwaitTreeLayer {
+    type LayeredAccess = AwaitTreeAccessor<A>;
 
-    fn layer(&self, accessor: A) -> Self::LayeredAccessor {
+    fn layer(&self, accessor: A) -> Self::LayeredAccess {
         AwaitTreeAccessor { inner: accessor }
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct AwaitTreeAccessor<A: Accessor> {
+pub struct AwaitTreeAccessor<A: Access> {
     inner: A,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<A: Accessor> LayeredAccessor for AwaitTreeAccessor<A> {
+impl<A: Access> LayeredAccess for AwaitTreeAccessor<A> {
     type Inner = A;
-    type Reader = A::Reader;
-    type BlockingReader = A::BlockingReader;
-    type Writer = A::Writer;
-    type BlockingWriter = A::BlockingWriter;
-    type Lister = A::Lister;
-    type BlockingLister = A::BlockingLister;
+    type Reader = AwaitTreeWrapper<A::Reader>;
+    type BlockingReader = AwaitTreeWrapper<A::BlockingReader>;
+    type Writer = AwaitTreeWrapper<A::Writer>;
+    type BlockingWriter = AwaitTreeWrapper<A::BlockingWriter>;
+    type Lister = AwaitTreeWrapper<A::Lister>;
+    type BlockingLister = AwaitTreeWrapper<A::BlockingLister>;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -85,6 +84,7 @@ impl<A: Accessor> LayeredAccessor for AwaitTreeAccessor<A> {
         self.inner
             .read(path, args)
             .instrument_await(format!("opendal::{}", Operation::Read))
+            .map(|v| v.map(|(rp, r)| (rp, AwaitTreeWrapper::new(r))))
             .await
     }
 
@@ -92,6 +92,7 @@ impl<A: Accessor> LayeredAccessor for AwaitTreeAccessor<A> {
         self.inner
             .write(path, args)
             .instrument_await(format!("opendal::{}", Operation::Write))
+            .map(|v| v.map(|(rp, r)| (rp, AwaitTreeWrapper::new(r))))
             .await
     }
 
@@ -127,6 +128,7 @@ impl<A: Accessor> LayeredAccessor for AwaitTreeAccessor<A> {
         self.inner
             .list(path, args)
             .instrument_await(format!("opendal::{}", Operation::List))
+            .map(|v| v.map(|(rp, r)| (rp, AwaitTreeWrapper::new(r))))
             .await
     }
 
@@ -145,14 +147,90 @@ impl<A: Accessor> LayeredAccessor for AwaitTreeAccessor<A> {
     }
 
     fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
-        self.inner.blocking_read(path, args)
+        self.inner
+            .blocking_read(path, args)
+            .map(|(rp, r)| (rp, AwaitTreeWrapper::new(r)))
     }
 
     fn blocking_write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::BlockingWriter)> {
-        self.inner.blocking_write(path, args)
+        self.inner
+            .blocking_write(path, args)
+            .map(|(rp, r)| (rp, AwaitTreeWrapper::new(r)))
     }
 
     fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingLister)> {
-        self.inner.blocking_list(path, args)
+        self.inner
+            .blocking_list(path, args)
+            .map(|(rp, r)| (rp, AwaitTreeWrapper::new(r)))
+    }
+}
+
+pub struct AwaitTreeWrapper<R> {
+    inner: R,
+}
+
+impl<R> AwaitTreeWrapper<R> {
+    fn new(inner: R) -> Self {
+        Self { inner }
+    }
+}
+
+impl<R: oio::Read> oio::Read for AwaitTreeWrapper<R> {
+    async fn read(&mut self) -> Result<Buffer> {
+        self.inner
+            .read()
+            .instrument_await(format!("opendal::{}", ReadOperation::Read))
+            .await
+    }
+}
+
+impl<R: oio::BlockingRead> oio::BlockingRead for AwaitTreeWrapper<R> {
+    fn read(&mut self) -> Result<Buffer> {
+        self.inner.read()
+    }
+}
+
+impl<R: oio::Write> oio::Write for AwaitTreeWrapper<R> {
+    fn write(&mut self, bs: Buffer) -> impl Future<Output = Result<usize>> + MaybeSend {
+        self.inner
+            .write(bs)
+            .instrument_await(format!("opendal::{}", WriteOperation::Write.into_static()))
+    }
+
+    fn abort(&mut self) -> impl Future<Output = Result<()>> + MaybeSend {
+        self.inner
+            .abort()
+            .instrument_await(format!("opendal::{}", WriteOperation::Abort.into_static()))
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<()>> + MaybeSend {
+        self.inner
+            .close()
+            .instrument_await(format!("opendal::{}", WriteOperation::Close.into_static()))
+    }
+}
+
+impl<R: oio::BlockingWrite> oio::BlockingWrite for AwaitTreeWrapper<R> {
+    fn write(&mut self, bs: Buffer) -> Result<usize> {
+        self.inner.write(bs)
+    }
+
+    fn close(&mut self) -> Result<()> {
+        self.inner.close()
+    }
+}
+
+impl<R: oio::List> oio::List for AwaitTreeWrapper<R> {
+    async fn next(&mut self) -> Result<Option<oio::Entry>> {
+        self.inner
+            .next()
+            .instrument_await(format!("opendal::{}", ListOperation::Next))
+            .await
+    }
+}
+
+impl<R: oio::BlockingList> oio::BlockingList for AwaitTreeWrapper<R> {
+    fn next(&mut self) -> Result<Option<oio::Entry>> {
+        self.inner.next()
     }
 }

@@ -15,74 +15,77 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::{collections::HashMap, env, process::Command};
+use fuse3::path::Session;
+use fuse3::MountOptions;
+use std::sync::OnceLock;
 
+use fuse3::raw::MountHandle;
+use opendal::raw::tests;
+use opendal::Capability;
 use tempfile::TempDir;
-use test_context::AsyncTestContext;
-use tokio::task::JoinHandle;
+use test_context::TestContext;
+use tokio::runtime::Runtime;
+use tokio::runtime::{self};
 
-pub(crate) struct OfsTestContext {
+static INIT_LOGGER: OnceLock<()> = OnceLock::new();
+static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+pub struct OfsTestContext {
     pub mount_point: TempDir,
-    ofs_task: JoinHandle<anyhow::Result<()>>,
+    // This is a false positive, the field is used in the test.
+    #[allow(dead_code)]
+    pub capability: Capability,
+    mount_handle: MountHandle,
 }
 
-impl AsyncTestContext for OfsTestContext {
-    async fn setup() -> Self {
-        let backend = backend_scheme().unwrap();
+impl TestContext for OfsTestContext {
+    fn setup() -> Self {
+        let backend = tests::init_test_service()
+            .expect("init test services failed")
+            .expect("no test services has been configured");
+        let capability = backend.info().full_capability();
+
+        INIT_LOGGER.get_or_init(env_logger::init);
 
         let mount_point = tempfile::tempdir().unwrap();
+        let mount_point_str = mount_point.path().to_string_lossy().to_string();
+        let mount_handle = RUNTIME
+            .get_or_init(|| {
+                runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build runtime")
+            })
+            .block_on(
+                #[allow(clippy::async_yields_async)]
+                async move {
+                    let mut mount_options = MountOptions::default();
+                    let gid = nix::unistd::getgid().into();
+                    mount_options.gid(gid);
+                    let uid = nix::unistd::getuid().into();
+                    mount_options.uid(uid);
 
-        let ofs_task = tokio::spawn(ofs::execute(ofs::Config {
-            mount_path: mount_point.path().to_string_lossy().to_string(),
-            backend: backend.parse().unwrap(),
-        }));
+                    let fs = fuse3_opendal::Filesystem::new(backend, uid, gid);
+                    Session::new(mount_options)
+                        .mount_with_unprivileged(fs, mount_point_str)
+                        .await
+                        .unwrap()
+                },
+            );
 
         OfsTestContext {
             mount_point,
-            ofs_task,
+            capability,
+            mount_handle,
         }
     }
 
-    async fn teardown(self) {
-        // FIXME: ofs could not unmount
-        Command::new("fusermount3")
-            .args(["-u", self.mount_point.path().to_str().unwrap()])
-            .output()
-            .unwrap();
-
-        self.ofs_task.abort();
-        self.mount_point.close().unwrap();
+    // We don't care if the unmount fails, so we ignore the result.
+    fn teardown(self) {
+        let _ = RUNTIME
+            .get()
+            .expect("runtime")
+            .block_on(async move { self.mount_handle.unmount().await });
+        let _ = self.mount_point.close();
     }
-}
-
-fn backend_scheme() -> Option<String> {
-    let scheme = env::var("OPENDAL_TEST").ok()?;
-    let prefix = format!("opendal_{scheme}_");
-
-    let mut cfg = env::vars()
-        .filter_map(|(k, v)| {
-            k.to_lowercase()
-                .strip_prefix(&prefix)
-                .map(|k| (k.to_string(), v))
-        })
-        .collect::<HashMap<String, String>>();
-
-    // Use random root unless OPENDAL_DISABLE_RANDOM_ROOT is set to true.
-    let disable_random_root = env::var("OPENDAL_DISABLE_RANDOM_ROOT").unwrap_or_default() == "true";
-    if !disable_random_root {
-        let root = format!(
-            "{}{}/",
-            cfg.get("root").cloned().unwrap_or_else(|| "/".to_string()),
-            uuid::Uuid::new_v4()
-        );
-        cfg.insert("root".to_string(), root);
-    }
-
-    let params = cfg
-        .into_iter()
-        .map(|(k, v)| format!("{}={}", urlencoding::encode(&k), urlencoding::encode(&v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    Some(format!("{scheme}://?{params}"))
 }

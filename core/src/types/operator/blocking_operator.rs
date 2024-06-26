@@ -16,7 +16,6 @@
 // under the License.
 
 use bytes::Buf;
-use bytes::Bytes;
 
 use super::operator_functions::*;
 use crate::raw::*;
@@ -82,13 +81,13 @@ use crate::*;
 /// ```
 #[derive(Clone, Debug)]
 pub struct BlockingOperator {
-    accessor: FusedAccessor,
+    accessor: Accessor,
 
     limit: usize,
 }
 
 impl BlockingOperator {
-    pub(super) fn inner(&self) -> &FusedAccessor {
+    pub(super) fn inner(&self) -> &Accessor {
         &self.accessor
     }
 
@@ -96,7 +95,7 @@ impl BlockingOperator {
     ///
     /// # Note
     /// default batch limit is 1000.
-    pub(crate) fn from_inner(accessor: FusedAccessor) -> Self {
+    pub(crate) fn from_inner(accessor: Accessor) -> Self {
         let limit = accessor
             .info()
             .full_capability()
@@ -144,9 +143,9 @@ impl BlockingOperator {
     ///
     /// # Notes
     ///
-    /// For fetch metadata of entries returned by [`Lister`], it's better to use [`list_with`] and
-    /// [`lister_with`] with `metakey` query like `Metakey::ContentLength | Metakey::LastModified`
-    /// so that we can avoid extra requests.
+    /// For fetch metadata of entries returned by [`BlockingLister`], it's better to
+    /// use [`BlockingOperator::list_with`] and [`BlockingOperator::lister_with`] with `metakey`
+    /// query like `Metakey::ContentLength | Metakey::LastModified` so that we can avoid extra requests.
     ///
     /// # Behavior
     ///
@@ -201,8 +200,9 @@ impl BlockingOperator {
     ///
     /// # Notes
     ///
-    /// For fetch metadata of entries returned by [`Lister`], it's better to use [`list_with`] and
-    /// [`lister_with`] with `metakey` query like `Metakey::ContentLength | Metakey::LastModified`
+    /// For fetch metadata of entries returned by [`Lister`], it's better to use
+    /// [`Operator::list_with`] and [`Operator::lister_with`] with `metakey` query like
+    /// `Metakey::ContentLength | Metakey::LastModified`
     /// so that we can avoid extra requests.
     ///
     /// # Behavior
@@ -396,7 +396,8 @@ impl BlockingOperator {
                     );
                 }
 
-                let r = BlockingReader::create(inner, &path, args)?;
+                let context = ReadContext::new(inner, path, args, OpReader::default());
+                let r = BlockingReader::new(context);
                 let buf = r.read(range.to_range())?;
                 Ok(buf)
             },
@@ -454,7 +455,8 @@ impl BlockingOperator {
                     );
                 }
 
-                BlockingReader::create(inner.clone(), &path, args)
+                let context = ReadContext::new(inner, path, args, OpReader::default());
+                Ok(BlockingReader::new(context))
             },
         ))
     }
@@ -479,7 +481,7 @@ impl BlockingOperator {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn write(&self, path: &str, bs: impl Into<Bytes>) -> Result<()> {
+    pub fn write(&self, path: &str, bs: impl Into<Buffer>) -> Result<()> {
         self.write_with(path, bs).call()
     }
 
@@ -620,7 +622,7 @@ impl BlockingOperator {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn write_with(&self, path: &str, bs: impl Into<Bytes>) -> FunctionWrite {
+    pub fn write_with(&self, path: &str, bs: impl Into<Buffer>) -> FunctionWrite {
         let path = normalize_path(path);
 
         let bs = bs.into();
@@ -641,7 +643,7 @@ impl BlockingOperator {
 
                 let (_, mut w) = inner.blocking_write(&path, args)?;
                 while !bs.is_empty() {
-                    let n = w.write(bs.clone().into())?;
+                    let n = w.write(bs.clone())?;
                     bs.advance(n);
                 }
                 w.close()?;
@@ -843,17 +845,20 @@ impl BlockingOperator {
     /// # }
     /// ```
     pub fn remove_all(&self, path: &str) -> Result<()> {
-        let meta = match self.stat(path) {
-            Ok(metadata) => metadata,
+        match self.stat(path) {
+            Ok(metadata) => {
+                if metadata.mode() != EntryMode::DIR {
+                    self.delete(path)?;
+                    // There may still be objects prefixed with the path in some backend, so we can't return here.
+                }
+            }
 
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            // If dir not found, it may be a prefix in object store like S3,
+            // and we still need to delete objects under the prefix.
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
 
             Err(e) => return Err(e),
         };
-
-        if meta.mode() != EntryMode::DIR {
-            return self.delete(path);
-        }
 
         let obs = self.lister_with(path).recursive(true).call()?;
 

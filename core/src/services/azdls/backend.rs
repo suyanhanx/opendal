@@ -20,7 +20,7 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use http::Response;
 use http::StatusCode;
 use log::debug;
 use reqsign::AzureStorageConfig;
@@ -34,7 +34,6 @@ use super::lister::AzdlsLister;
 use super::writer::AzdlsWriter;
 use super::writer::AzdlsWriters;
 use crate::raw::*;
-use crate::services::azdls::reader::AzdlsReader;
 use crate::*;
 
 /// Known endpoint suffix Azure Data Lake Storage Gen2 URI syntax.
@@ -244,9 +243,8 @@ pub struct AzdlsBackend {
     core: Arc<AzdlsCore>,
 }
 
-#[async_trait]
-impl Accessor for AzdlsBackend {
-    type Reader = AzdlsReader;
+impl Access for AzdlsBackend {
+    type Reader = HttpBody;
     type Writer = AzdlsWriters;
     type Lister = oio::PageLister<AzdlsLister>;
     type BlockingReader = ();
@@ -344,10 +342,17 @@ impl Accessor for AzdlsBackend {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            AzdlsReader::new(self.core.clone(), path, args),
-        ))
+        let resp = self.core.azdls_read(path, args.range()).await?;
+
+        let status = resp.status();
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => Ok((RpRead::new(), resp.into_body())),
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {

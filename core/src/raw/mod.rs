@@ -73,10 +73,14 @@ mod futures_util;
 pub use futures_util::BoxedFuture;
 pub use futures_util::BoxedStaticFuture;
 pub use futures_util::ConcurrentFutures;
+pub use futures_util::ConcurrentTasks;
 pub use futures_util::MaybeSend;
 
 mod enum_utils;
 pub use enum_utils::*;
+
+mod atomic_util;
+pub use atomic_util::*;
 
 // Expose as a pub mod to avoid confusing.
 pub mod adapters;

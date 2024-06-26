@@ -20,18 +20,37 @@
 // @ts-check
 // Note: type annotations allow type checking and IDEs autocompletion
 
+const semver = require("semver");
+const exec = require('child_process').execSync;
+
 const lightCodeTheme = require('prism-react-renderer/themes/github');
 const darkCodeTheme = require('prism-react-renderer/themes/dracula');
 const repoAddress = 'https://github.com/apache/opendal';
 
 const baseUrl = process.env.OPENDAL_WEBSITE_BASE_URL ? process.env.OPENDAL_WEBSITE_BASE_URL : '/';
 const websiteNotLatest = process.env.OPENDAL_WEBSITE_NOT_LATEST ? process.env.OPENDAL_WEBSITE_NOT_LATEST : false;
+const websiteStaging = process.env.OPENDAL_WEBSITE_STAGING ? process.env.OPENDAL_WEBSITE_STAGING : false;
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'Apache OpenDAL™',
   tagline: 'Open Data Access Layer: Access data freely, painlessly, and efficiently',
   favicon: 'img/favicon.ico',
+
+  customFields: {
+    isStaging: websiteStaging,
+    version: (function () {
+      if (websiteStaging && process.env.GITHUB_REF_TYPE === 'tag') {
+        const refName = process.env.GITHUB_REF_NAME;
+        const version = semver.parse(refName, {}, true);
+        return `${version.major}.${version.minor}.${version.patch}`;
+      }
+
+      const refName = exec("git describe --tags --abbrev=0 --exclude '*rc*'").toString();
+      const version = semver.parse(refName, {}, true);
+      return `${version.major}.${version.minor}.${version.patch}`;
+    })()
+  },
 
   url: 'https://opendal.apache.org/',
   baseUrl: '/',
@@ -132,36 +151,6 @@ const config = {
             docId: 'overview',
             position: 'right',
             label: 'Docs',
-          },
-          {
-            position: 'right',
-            label: 'API',
-            items: [
-              {
-                label: 'Rust Core',
-                to: 'pathname:///docs/rust/opendal/'
-              },
-              {
-                label: 'Node.js Binding',
-                to: 'pathname:///docs/nodejs/'
-              },
-              {
-                label: 'Python Binding',
-                to: 'pathname:///docs/python/'
-              },
-              {
-                label: 'Java Binding',
-                to: 'pathname:///docs/java/'
-              },
-              {
-                label: 'object-store-opendal',
-                to: 'pathname:///docs/object-store-opendal/object_store_opendal'
-              },
-              {
-                label: 'dav-server-opendalfs',
-                to: 'pathname:///docs/dav-server-opendalfs/dav_server_opendalfs'
-              }
-            ]
           },
           {
             to: '/blog',

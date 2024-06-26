@@ -16,15 +16,16 @@
 # under the License.
 
 [package]
-edition = "2021"
-license = "Apache-2.0"
 name = "edge_test_file_write_on_full_disk"
+
+edition.workspace = true
+license.workspace = true
 publish = false
-rust-version = "1.75"
-version = "0.0.0"
+rust-version.workspace = true
+version.workspace = true
 
 [dependencies]
 futures = "0.3"
-opendal = { path = "../../", features = ["services-memory", "services-fs"] }
+opendal = { path = "../..", features = ["services-memory", "services-fs"] }
 rand = "0.8"
 tokio = { version = "1", features = ["full"] }

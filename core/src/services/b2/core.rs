@@ -134,7 +134,7 @@ impl B2Core {
         path: &str,
         range: BytesRange,
         _args: &OpRead,
-    ) -> Result<Response<Buffer>> {
+    ) -> Result<Response<HttpBody>> {
         let path = build_abs_path(&self.root, path);
 
         let auth_info = self.get_auth_info().await?;
@@ -157,7 +157,7 @@ impl B2Core {
 
         let req = req.body(Buffer::new()).map_err(new_request_build_error)?;
 
-        self.send(req).await
+        self.client.fetch(req).await
     }
 
     pub(super) async fn get_upload_url(&self) -> Result<GetUploadUrlResponse> {
@@ -289,7 +289,7 @@ impl B2Core {
         };
 
         if let Some(mime) = args.content_type() {
-            start_large_file_request.content_type = mime.to_owned();
+            mime.clone_into(&mut start_large_file_request.content_type)
         }
 
         let body =
@@ -629,7 +629,6 @@ pub struct File {
     pub content_md5: Option<String>,
     pub content_type: Option<String>,
     pub file_name: String,
-    pub action: String,
 }
 
 pub(super) fn parse_file_info(file: &File) -> Metadata {

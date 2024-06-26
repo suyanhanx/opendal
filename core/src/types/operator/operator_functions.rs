@@ -21,7 +21,6 @@
 
 use std::ops::RangeBounds;
 
-use bytes::Bytes;
 use flagset::FlagSet;
 
 use crate::raw::*;
@@ -31,18 +30,18 @@ use crate::*;
 ///
 /// The function will consume all the input to generate a result.
 pub(crate) struct OperatorFunction<T, R> {
-    inner: FusedAccessor,
+    inner: Accessor,
     path: String,
     args: T,
-    f: fn(FusedAccessor, String, T) -> Result<R>,
+    f: fn(Accessor, String, T) -> Result<R>,
 }
 
 impl<T, R> OperatorFunction<T, R> {
     pub fn new(
-        inner: FusedAccessor,
+        inner: Accessor,
         path: String,
         args: T,
-        f: fn(FusedAccessor, String, T) -> Result<R>,
+        f: fn(Accessor, String, T) -> Result<R>,
     ) -> Self {
         Self {
             inner,
@@ -72,7 +71,7 @@ impl<T, R> OperatorFunction<T, R> {
 pub struct FunctionWrite(
     /// The args for FunctionWrite is a bit special because we also
     /// need to move the bytes input this function.
-    pub(crate) OperatorFunction<(OpWrite, Bytes), ()>,
+    pub(crate) OperatorFunction<(OpWrite, Buffer), ()>,
 );
 
 impl FunctionWrite {

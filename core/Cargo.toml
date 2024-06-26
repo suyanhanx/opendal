@@ -28,7 +28,7 @@ homepage = "https://opendal.apache.org/"
 license = "Apache-2.0"
 repository = "https://github.com/apache/opendal"
 rust-version = "1.75"
-version = "0.45.1"
+version = "0.47.1"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -36,10 +36,16 @@ rustdoc-args = ["--cfg", "docs"]
 
 [workspace]
 default-members = ["."]
-members = [".", "fuzz", "edge/*", "benches/vs_*"]
+members = [".", "examples/*", "fuzz", "edge/*", "benches/vs_*"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.75"
+version = "0.47.1"
 
 [features]
-default = ["reqwest/rustls-tls", "services-memory"]
+default = ["reqwest/rustls-tls", "executors-tokio", "services-memory"]
 
 # Build test utils or not.
 #
@@ -56,6 +62,7 @@ tests = [
   "services-fs",
   "services-http",
   "services-memory",
+  "internal-tokio-rt",
   "services-s3",
 ]
 
@@ -64,6 +71,9 @@ tests = [
 internal-path-cache = ["dep:moka"]
 # Enable tokio runtime.
 internal-tokio-rt = ["tokio/rt-multi-thread"]
+
+# Enable tokio executors support.
+executors-tokio = ["tokio/rt"]
 
 # Enable layers chaos support
 layers-chaos = ["dep:rand"]
@@ -91,6 +101,7 @@ layers-async-backtrace = ["dep:async-backtrace"]
 layers-blocking = ["internal-tokio-rt"]
 layers-dtrace = ["dep:probe"]
 
+services-aliyun-drive = []
 services-alluxio = []
 services-atomicserver = ["dep:atomic_lib"]
 services-azblob = [
@@ -173,6 +184,7 @@ services-s3 = [
   "dep:reqsign",
   "reqsign?/services-aws",
   "reqsign?/reqwest_request",
+  "dep:crc32c",
 ]
 services-seafile = []
 services-sftp = ["dep:openssh", "dep:openssh-sftp-client", "dep:bb8"]
@@ -185,7 +197,6 @@ services-tikv = ["tikv-client"]
 services-upyun = ["dep:hmac", "dep:sha1"]
 services-vercel-artifacts = []
 services-vercel-blob = []
-services-wasabi = []
 services-webdav = []
 services-webhdfs = []
 services-yandex-disk = []
@@ -203,6 +214,11 @@ harness = false
 name = "oio"
 required-features = ["tests"]
 
+[[bench]]
+harness = false
+name = "types"
+required-features = ["tests"]
+
 [[test]]
 harness = false
 name = "behavior"
@@ -215,7 +231,7 @@ async-tls = { version = "0.13.0", optional = true }
 # Required dependencies
 anyhow = { version = "1.0.30", features = ["std"] }
 async-trait = "0.1.68"
-backon = "0.4.3"
+backon = "0.4.4"
 base64 = "0.22"
 bytes = "1.6"
 chrono = { version = "0.4.28", default-features = false, features = [
@@ -223,7 +239,10 @@ chrono = { version = "0.4.28", default-features = false, features = [
   "std",
 ] }
 flagset = "0.4"
-futures = { version = "0.3", default-features = false, features = ["std"] }
+futures = { version = "0.3", default-features = false, features = [
+  "std",
+  "async-await",
+] }
 http = "1.1"
 log = "0.4"
 md-5 = "0.10"
@@ -254,7 +273,7 @@ sha1 = { version = "0.10.6", optional = true }
 sha2 = { version = "0.10", optional = true }
 
 # For http based services.
-reqsign = { version = "0.15.0", default-features = false, optional = true }
+reqsign = { version = "0.15.2", default-features = false, optional = true }
 
 # for services-atomic-server
 atomic_lib = { version = "0.34.5", optional = true }
@@ -309,7 +328,7 @@ redis = { version = "0.23.1", features = [
 # for services-rocksdb
 rocksdb = { version = "0.21.0", default-features = false, optional = true }
 # for services-sqlite
-rusqlite = { version = "0.29.0", optional = true, features = ["bundled"] }
+rusqlite = { version = "0.31.0", optional = true, features = ["bundled"] }
 # for services-sled
 sled = { version = "0.34.7", optional = true }
 # for services-ftp
@@ -321,11 +340,13 @@ suppaftp = { version = "5.3.1", default-features = false, features = [
 # for services-tikv
 tikv-client = { version = "0.3.0", optional = true, default-features = false }
 # for services-hdfs-native
-hdfs-native = { version = "0.6.0", optional = true }
+hdfs-native = { version = "0.9.4", optional = true }
 # for services-surrealdb
 surrealdb = { version = "1.3.0", optional = true, features = ["protocol-http"] }
 # for services-compfs
-compio = { version = "0.10.0", optional = true, features = ["runtime", "bytes", "polling"] }
+compio = { version = "0.11.0", optional = true, features = ["runtime", "bytes", "polling", "dispatcher"] }
+# for services-s3
+crc32c = { version = "0.6.6", optional = true }
 
 # Layers
 # for layers-async-backtrace
@@ -350,7 +371,6 @@ prometheus-client = { version = "0.22.2", optional = true }
 tracing = { version = "0.1", optional = true }
 # for layers-dtrace
 probe = { version = "0.5.1", optional = true }
-crc32c = "0.6.5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }

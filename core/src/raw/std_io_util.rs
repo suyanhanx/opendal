@@ -33,14 +33,13 @@ pub fn new_std_io_error(err: std::io::Error) -> Error {
         NotFound => (ErrorKind::NotFound, false),
         PermissionDenied => (ErrorKind::PermissionDenied, false),
         AlreadyExists => (ErrorKind::AlreadyExists, false),
-        InvalidInput => (ErrorKind::InvalidInput, false),
         Unsupported => (ErrorKind::Unsupported, false),
 
         Interrupted | UnexpectedEof | TimedOut | WouldBlock => (ErrorKind::Unexpected, true),
         _ => (ErrorKind::Unexpected, true),
     };
 
-    let mut err = Error::new(kind, &err.kind().to_string()).set_source(err);
+    let mut err = Error::new(kind, err.kind().to_string()).set_source(err);
 
     if retryable {
         err = err.set_temporary();
@@ -59,7 +58,6 @@ pub(crate) fn format_std_io_error(err: Error) -> io::Error {
     let kind = match err.kind() {
         ErrorKind::NotFound => io::ErrorKind::NotFound,
         ErrorKind::PermissionDenied => io::ErrorKind::PermissionDenied,
-        ErrorKind::InvalidInput => io::ErrorKind::InvalidInput,
         _ => io::ErrorKind::Interrupted,
     };
 

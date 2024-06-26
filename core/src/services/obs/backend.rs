@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use async_trait::async_trait;
+use http::Response;
 use http::StatusCode;
 use http::Uri;
 use log::debug;
@@ -32,7 +32,6 @@ use super::error::parse_error;
 use super::lister::ObsLister;
 use super::writer::ObsWriter;
 use crate::raw::*;
-use crate::services::obs::reader::ObsReader;
 use crate::services::obs::writer::ObsWriters;
 use crate::*;
 
@@ -247,9 +246,8 @@ pub struct ObsBackend {
     core: Arc<ObsCore>,
 }
 
-#[async_trait]
-impl Accessor for ObsBackend {
-    type Reader = ObsReader;
+impl Access for ObsBackend {
+    type Reader = HttpBody;
     type Writer = ObsWriters;
     type Lister = oio::PageLister<ObsLister>;
     type BlockingReader = ();
@@ -323,10 +321,20 @@ impl Accessor for ObsBackend {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            ObsReader::new(self.core.clone(), path, args),
-        ))
+        let resp = self.core.obs_get_object(path, args.range(), &args).await?;
+
+        let status = resp.status();
+
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => {
+                Ok((RpRead::default(), resp.into_body()))
+            }
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -335,7 +343,11 @@ impl Accessor for ObsBackend {
         let w = if args.append() {
             ObsWriters::Two(oio::AppendWriter::new(writer))
         } else {
-            ObsWriters::One(oio::MultipartWriter::new(writer, args.concurrent()))
+            ObsWriters::One(oio::MultipartWriter::new(
+                writer,
+                args.executor().cloned(),
+                args.concurrent(),
+            ))
         };
 
         Ok((RpWrite::default(), w))

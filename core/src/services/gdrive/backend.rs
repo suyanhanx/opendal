@@ -18,11 +18,11 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Buf;
 use bytes::Bytes;
 use chrono::Utc;
 use http::Request;
+use http::Response;
 use http::StatusCode;
 use serde_json::json;
 
@@ -30,7 +30,6 @@ use super::core::GdriveCore;
 use super::core::GdriveFile;
 use super::error::parse_error;
 use super::lister::GdriveLister;
-use super::reader::GdriveReader;
 use super::writer::GdriveWriter;
 use crate::raw::*;
 use crate::*;
@@ -40,10 +39,8 @@ pub struct GdriveBackend {
     pub core: Arc<GdriveCore>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Accessor for GdriveBackend {
-    type Reader = GdriveReader;
+impl Access for GdriveBackend {
+    type Reader = HttpBody;
     type Writer = oio::OneShotWriter<GdriveWriter>;
     type Lister = oio::PageLister<GdriveLister>;
     type BlockingReader = ();
@@ -110,10 +107,17 @@ impl Accessor for GdriveBackend {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            GdriveReader::new(self.core.clone(), path, args),
-        ))
+        let resp = self.core.gdrive_get(path, args.range()).await?;
+
+        let status = resp.status();
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => Ok((RpRead::new(), resp.into_body())),
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, _: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -146,7 +150,7 @@ impl Accessor for GdriveBackend {
 
         self.core.path_cache.remove(&path).await;
 
-        return Ok(RpDelete::default());
+        Ok(RpDelete::default())
     }
 
     async fn list(&self, path: &str, _args: OpList) -> Result<(RpList, Self::Lister)> {

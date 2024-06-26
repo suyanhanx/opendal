@@ -15,9 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use bytes::Buf;
+
 use crate::raw::*;
 use crate::*;
-use bytes::Buf;
 
 /// BlockingWriter is designed to write data into given path in an blocking
 /// manner.
@@ -33,7 +34,7 @@ impl BlockingWriter {
     ///
     /// We don't want to expose those details to users so keep this function
     /// in crate only.
-    pub(crate) fn create(acc: FusedAccessor, path: &str, op: OpWrite) -> Result<Self> {
+    pub(crate) fn create(acc: Accessor, path: &str, op: OpWrite) -> Result<Self> {
         let (_, w) = acc.blocking_write(path, op)?;
 
         Ok(BlockingWriter { inner: w })

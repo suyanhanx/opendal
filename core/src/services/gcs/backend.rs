@@ -20,8 +20,8 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Buf;
+use http::Response;
 use http::StatusCode;
 use log::debug;
 use reqsign::GoogleCredentialLoader;
@@ -34,7 +34,6 @@ use serde_json;
 use super::core::*;
 use super::error::parse_error;
 use super::lister::GcsLister;
-use super::reader::GcsReader;
 use super::writer::GcsWriter;
 use super::writer::GcsWriters;
 use crate::raw::*;
@@ -331,10 +330,8 @@ pub struct GcsBackend {
     core: Arc<GcsCore>,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl Accessor for GcsBackend {
-    type Reader = GcsReader;
+impl Access for GcsBackend {
+    type Reader = HttpBody;
     type Writer = GcsWriters;
     type Lister = oio::PageLister<GcsLister>;
     type BlockingReader = ();
@@ -365,7 +362,7 @@ impl Accessor for GcsBackend {
                 // It's recommended that you use at least 8 MiB for the chunk size.
                 //
                 // Reference: [Perform resumable uploads](https://cloud.google.com/storage/docs/performing-resumable-uploads)
-                write_multi_align_size: Some(256 * 1024 * 1024),
+                write_multi_align_size: Some(8 * 1024 * 1024),
 
                 delete: true,
                 copy: true,
@@ -419,16 +416,27 @@ impl Accessor for GcsBackend {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            GcsReader::new(self.core.clone(), path, args),
-        ))
+        let resp = self.core.gcs_get_object(path, args.range(), &args).await?;
+
+        let status = resp.status();
+
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => {
+                Ok((RpRead::default(), resp.into_body()))
+            }
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        let concurrent = args.concurrent();
+        let executor = args.executor().cloned();
         let w = GcsWriter::new(self.core.clone(), path, args);
-        let w = oio::RangeWriter::new(w, concurrent);
+        // Gcs can't support concurrent write, always use concurrent=1 for now.
+        let w = oio::RangeWriter::new(w, executor, 1);
 
         Ok((RpWrite::default(), w))
     }

@@ -25,7 +25,6 @@ allow = [
   "ISC",
   "CC0-1.0",
 ]
-copyleft = "deny"
 exceptions = [
   { allow = [
     "OpenSSL",
@@ -34,7 +33,7 @@ exceptions = [
     "Unicode-DFS-2016",
   ], name = "unicode-ident" },
 ]
-unlicensed = "deny"
+version = 2
 
 [[licenses.clarify]]
 name = "ring"

@@ -19,7 +19,6 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes;
 use bytes::Buf;
 use bytes::Bytes;
@@ -61,7 +60,7 @@ impl GdriveCore {
         let path = build_abs_path(&self.root, path);
         let file_id = self.path_cache.get(&path).await?.ok_or(Error::new(
             ErrorKind::NotFound,
-            &format!("path not found: {}", path),
+            format!("path not found: {}", path),
         ))?;
 
         // The file metadata in the Google Drive API is very complex.
@@ -77,11 +76,11 @@ impl GdriveCore {
         self.client.send(req).await
     }
 
-    pub async fn gdrive_get(&self, path: &str, range: BytesRange) -> Result<Response<Buffer>> {
+    pub async fn gdrive_get(&self, path: &str, range: BytesRange) -> Result<Response<HttpBody>> {
         let path = build_abs_path(&self.root, path);
         let path_id = self.path_cache.get(&path).await?.ok_or(Error::new(
             ErrorKind::NotFound,
-            &format!("path not found: {}", path),
+            format!("path not found: {}", path),
         ))?;
 
         let url: String = format!(
@@ -95,7 +94,7 @@ impl GdriveCore {
             .map_err(new_request_build_error)?;
         self.sign(&mut req).await?;
 
-        self.client.send(req).await
+        self.client.fetch(req).await
     }
 
     pub async fn gdrive_list(
@@ -130,7 +129,7 @@ impl GdriveCore {
     ) -> Result<Response<Buffer>> {
         let source_file_id = self.path_cache.get(source).await?.ok_or(Error::new(
             ErrorKind::NotFound,
-            &format!("source path not found: {}", source),
+            format!("source path not found: {}", source),
         ))?;
         let source_parent = get_parent(source);
         let source_parent_id = self
@@ -314,7 +313,7 @@ impl GdriveSigner {
                     let resp_body = resp.into_body();
                     let token: GdriveTokenResponse = serde_json::from_reader(resp_body.reader())
                         .map_err(new_json_deserialize_error)?;
-                    self.access_token = token.access_token.clone();
+                    self.access_token.clone_from(&token.access_token);
                     self.expires_in = Utc::now()
                         + chrono::TimeDelta::try_seconds(token.expires_in)
                             .expect("expires_in must be valid seconds")
@@ -345,8 +344,6 @@ impl GdrivePathQuery {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PathQuery for GdrivePathQuery {
     async fn root(&self) -> Result<String> {
         Ok("root".to_string())

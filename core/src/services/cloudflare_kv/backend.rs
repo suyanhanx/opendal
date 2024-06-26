@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 
-use async_trait::async_trait;
 use bytes::Buf;
 use http::header;
 use http::Request;
@@ -209,7 +208,6 @@ impl Adapter {
     }
 }
 
-#[async_trait]
 impl kv::Adapter for Adapter {
     fn metadata(&self) -> kv::Metadata {
         kv::Metadata::new(
@@ -288,7 +286,7 @@ impl kv::Adapter for Adapter {
                     serde_json::from_reader(body.reader()).map_err(|e| {
                         Error::new(
                             ErrorKind::Unexpected,
-                            &format!("failed to parse error response: {}", e),
+                            format!("failed to parse error response: {}", e),
                         )
                     })?;
                 Ok(response.result.into_iter().map(|r| r.name).collect())

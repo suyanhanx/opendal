@@ -18,7 +18,6 @@
 use core::fmt::Debug;
 use std::collections::HashMap;
 
-use async_trait::async_trait;
 use bytes::Buf;
 use http::header::CONTENT_LENGTH;
 use http::header::CONTENT_TYPE;
@@ -37,7 +36,6 @@ use super::message::FileStatusWrapper;
 use super::writer::WebhdfsWriter;
 use super::writer::WebhdfsWriters;
 use crate::raw::*;
-use crate::services::webhdfs::reader::WebhdfsReader;
 use crate::*;
 
 const WEBHDFS_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:9870";
@@ -462,9 +460,9 @@ impl WebhdfsBackend {
         &self,
         path: &str,
         range: BytesRange,
-    ) -> Result<Response<Buffer>> {
+    ) -> Result<Response<HttpBody>> {
         let req = self.webhdfs_open_request(path, &range).await?;
-        self.client.send(req).await
+        self.client.fetch(req).await
     }
 
     pub(super) async fn webhdfs_get_file_status(&self, path: &str) -> Result<Response<Buffer>> {
@@ -530,9 +528,8 @@ impl WebhdfsBackend {
     }
 }
 
-#[async_trait]
-impl Accessor for WebhdfsBackend {
-    type Reader = WebhdfsReader;
+impl Access for WebhdfsBackend {
+    type Reader = HttpBody;
     type Writer = WebhdfsWriters;
     type Lister = oio::PageLister<WebhdfsLister>;
     type BlockingReader = ();
@@ -627,10 +624,20 @@ impl Accessor for WebhdfsBackend {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            WebhdfsReader::new(self.clone(), path, args),
-        ))
+        let resp = self.webhdfs_read_file(path, args.range()).await?;
+
+        let status = resp.status();
+
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => {
+                Ok((RpRead::default(), resp.into_body()))
+            }
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -639,7 +646,11 @@ impl Accessor for WebhdfsBackend {
         let w = if args.append() {
             WebhdfsWriters::Two(oio::AppendWriter::new(w))
         } else {
-            WebhdfsWriters::One(oio::BlockWriter::new(w, args.concurrent()))
+            WebhdfsWriters::One(oio::BlockWriter::new(
+                w,
+                args.executor().cloned(),
+                args.concurrent(),
+            ))
         };
 
         Ok((RpWrite::default(), w))

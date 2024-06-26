@@ -18,15 +18,14 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use backon::Retryable;
 use bytes::Buf;
+use http::Response;
 use http::StatusCode;
 
 use super::core::*;
 use super::error::*;
 use super::lister::DropboxLister;
-use super::reader::DropboxReader;
 use super::writer::DropboxWriter;
 use crate::raw::*;
 use crate::*;
@@ -36,9 +35,8 @@ pub struct DropboxBackend {
     pub core: Arc<DropboxCore>,
 }
 
-#[async_trait]
-impl Accessor for DropboxBackend {
-    type Reader = DropboxReader;
+impl Access for DropboxBackend {
+    type Reader = HttpBody;
     type Writer = oio::OneShotWriter<DropboxWriter>;
     type Lister = oio::PageLister<DropboxLister>;
     type BlockingReader = ();
@@ -88,7 +86,7 @@ impl Accessor for DropboxBackend {
             if "file" == decoded_response.tag {
                 return Err(Error::new(
                     ErrorKind::NotADirectory,
-                    &format!("it's not a directory {}", path),
+                    format!("it's not a directory {}", path),
                 ));
             }
         }
@@ -134,7 +132,7 @@ impl Accessor for DropboxBackend {
                     } else {
                         return Err(Error::new(
                             ErrorKind::Unexpected,
-                            &format!("no size found for file {}", path),
+                            format!("no size found for file {}", path),
                         ));
                     }
                 }
@@ -145,10 +143,19 @@ impl Accessor for DropboxBackend {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        Ok((
-            RpRead::default(),
-            DropboxReader::new(self.core.clone(), path, args),
-        ))
+        let resp = self.core.dropbox_get(path, args.range(), &args).await?;
+
+        let status = resp.status();
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => {
+                Ok((RpRead::default(), resp.into_body()))
+            }
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -265,7 +272,7 @@ impl Accessor for DropboxBackend {
             }
             _ => Err(Error::new(
                 ErrorKind::Unexpected,
-                &format!(
+                format!(
                     "delete batch failed with unexpected tag {}",
                     decoded_response.tag
                 ),

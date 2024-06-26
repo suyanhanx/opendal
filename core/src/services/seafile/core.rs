@@ -143,7 +143,7 @@ impl SeafileCore {
                     if signer.auth_info.repo_id.is_empty() {
                         return Err(Error::new(
                             ErrorKind::NotFound,
-                            &format!("repo {} not found", self.repo_name),
+                            format!("repo {} not found", self.repo_name),
                         ));
                     }
                 }
@@ -218,7 +218,7 @@ impl SeafileCore {
     }
 
     /// download file
-    pub async fn download_file(&self, path: &str, range: BytesRange) -> Result<Response<Buffer>> {
+    pub async fn download_file(&self, path: &str, range: BytesRange) -> Result<Response<HttpBody>> {
         let download_url = self.get_download_url(path).await?;
 
         let req = Request::get(download_url);
@@ -228,7 +228,7 @@ impl SeafileCore {
             .body(Buffer::new())
             .map_err(new_request_build_error)?;
 
-        self.send(req).await
+        self.client.fetch(req).await
     }
 
     /// file detail

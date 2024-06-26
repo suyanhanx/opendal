@@ -16,9 +16,8 @@
 // under the License.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
-
-use async_trait::async_trait;
 
 use crate::raw::oio::ListOperation;
 use crate::raw::oio::ReadOperation;
@@ -45,6 +44,26 @@ use crate::*;
 ///
 /// - timeout: 60 seconds
 /// - io_timeout: 10 seconds
+///
+/// # Panics
+///
+/// TimeoutLayer will drop the future if the timeout is reached. This might cause the internal state
+/// of the future to be broken. If underlying future moves ownership into the future, it will be
+/// dropped and will neven return back.
+///
+/// For example, while using `TimeoutLayer` with `RetryLayer` at the same time, please make sure
+/// timeout layer showed up before retry layer.
+///
+/// ```no_build
+///  let op = Operator::new(builder.clone())
+///     .unwrap()
+///     // This is fine, since timeout happen during retry.
+///     .layer(TimeoutLayer::new().with_io_timeout(Duration::from_nanos(1)))
+///     .layer(RetryLayer::new())
+///     // This is wrong. Since timeout layer will drop future, leaving retry layer in a bad state.
+///     .layer(TimeoutLayer::new().with_io_timeout(Duration::from_nanos(1)))
+///     .finish();
+/// ```
 ///
 /// # Examples
 ///
@@ -137,10 +156,10 @@ impl TimeoutLayer {
     }
 }
 
-impl<A: Accessor> Layer<A> for TimeoutLayer {
-    type LayeredAccessor = TimeoutAccessor<A>;
+impl<A: Access> Layer<A> for TimeoutLayer {
+    type LayeredAccess = TimeoutAccessor<A>;
 
-    fn layer(&self, inner: A) -> Self::LayeredAccessor {
+    fn layer(&self, inner: A) -> Self::LayeredAccess {
         TimeoutAccessor {
             inner,
 
@@ -151,14 +170,14 @@ impl<A: Accessor> Layer<A> for TimeoutLayer {
 }
 
 #[derive(Debug, Clone)]
-pub struct TimeoutAccessor<A: Accessor> {
+pub struct TimeoutAccessor<A: Access> {
     inner: A,
 
     timeout: Duration,
     io_timeout: Duration,
 }
 
-impl<A: Accessor> TimeoutAccessor<A> {
+impl<A: Access> TimeoutAccessor<A> {
     async fn timeout<F: Future<Output = Result<T>>, T>(&self, op: Operation, fut: F) -> Result<T> {
         tokio::time::timeout(self.timeout, fut).await.map_err(|_| {
             Error::new(ErrorKind::Unexpected, "operation timeout reached")
@@ -184,9 +203,7 @@ impl<A: Accessor> TimeoutAccessor<A> {
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<A: Accessor> LayeredAccessor for TimeoutAccessor<A> {
+impl<A: Access> LayeredAccess for TimeoutAccessor<A> {
     type Inner = A;
     type Reader = TimeoutWrapper<A::Reader>;
     type BlockingReader = A::BlockingReader;
@@ -204,13 +221,27 @@ impl<A: Accessor> LayeredAccessor for TimeoutAccessor<A> {
             .await
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
+    async fn read(&self, path: &str, mut args: OpRead) -> Result<(RpRead, Self::Reader)> {
+        if let Some(exec) = args.executor().cloned() {
+            args = args.with_executor(Executor::with(TimeoutExecutor::new(
+                exec.into_inner(),
+                self.io_timeout,
+            )));
+        }
+
         self.io_timeout(Operation::Read, self.inner.read(path, args))
             .await
             .map(|(rp, r)| (rp, TimeoutWrapper::new(r, self.io_timeout)))
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+    async fn write(&self, path: &str, mut args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+        if let Some(exec) = args.executor().cloned() {
+            args = args.with_executor(Executor::with(TimeoutExecutor::new(
+                exec.into_inner(),
+                self.io_timeout,
+            )));
+        }
+
         self.io_timeout(Operation::Write, self.inner.write(path, args))
             .await
             .map(|(rp, r)| (rp, TimeoutWrapper::new(r, self.io_timeout)))
@@ -264,6 +295,27 @@ impl<A: Accessor> LayeredAccessor for TimeoutAccessor<A> {
     }
 }
 
+pub struct TimeoutExecutor {
+    exec: Arc<dyn Execute>,
+    timeout: Duration,
+}
+
+impl TimeoutExecutor {
+    pub fn new(exec: Arc<dyn Execute>, timeout: Duration) -> Self {
+        Self { exec, timeout }
+    }
+}
+
+impl Execute for TimeoutExecutor {
+    fn execute(&self, f: BoxedStaticFuture<()>) {
+        self.exec.execute(f)
+    }
+
+    fn timeout(&self) -> Option<BoxedStaticFuture<()>> {
+        Some(Box::pin(tokio::time::sleep(self.timeout)))
+    }
+}
+
 pub struct TimeoutWrapper<R> {
     inner: R,
 
@@ -291,8 +343,8 @@ impl<R> TimeoutWrapper<R> {
 }
 
 impl<R: oio::Read> oio::Read for TimeoutWrapper<R> {
-    async fn read_at(&self, offset: u64, limit: usize) -> Result<Buffer> {
-        let fut = self.inner.read_at(offset, limit);
+    async fn read(&mut self) -> Result<Buffer> {
+        let fut = self.inner.read();
         Self::io_timeout(self.timeout, ReadOperation::Read.into_static(), fut).await
     }
 }
@@ -328,7 +380,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use async_trait::async_trait;
     use futures::StreamExt;
     use tokio::time::sleep;
     use tokio::time::timeout;
@@ -341,9 +392,7 @@ mod tests {
     #[derive(Debug, Clone, Default)]
     struct MockService;
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    impl Accessor for MockService {
+    impl Access for MockService {
         type Reader = MockReader;
         type Writer = ();
         type Lister = MockLister;
@@ -383,7 +432,7 @@ mod tests {
     struct MockReader;
 
     impl oio::Read for MockReader {
-        fn read_at(&self, _: u64, _: usize) -> impl Future<Output = Result<Buffer>> {
+        fn read(&mut self) -> impl Future<Output = Result<Buffer>> {
             pending()
         }
     }
@@ -399,7 +448,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_operation_timeout() {
-        let acc = Arc::new(TypeEraseLayer.layer(MockService)) as FusedAccessor;
+        let acc = Arc::new(TypeEraseLayer.layer(MockService)) as Accessor;
         let op = Operator::from_inner(acc)
             .layer(TimeoutLayer::new().with_timeout(Duration::from_secs(1)));
 
@@ -418,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_io_timeout() {
-        let acc = Arc::new(TypeEraseLayer.layer(MockService)) as FusedAccessor;
+        let acc = Arc::new(TypeEraseLayer.layer(MockService)) as Accessor;
         let op = Operator::from_inner(acc)
             .layer(TimeoutLayer::new().with_io_timeout(Duration::from_secs(1)));
 
@@ -433,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_timeout() {
-        let acc = Arc::new(TypeEraseLayer.layer(MockService)) as FusedAccessor;
+        let acc = Arc::new(TypeEraseLayer.layer(MockService)) as Accessor;
         let op = Operator::from_inner(acc).layer(
             TimeoutLayer::new()
                 .with_timeout(Duration::from_secs(1))
@@ -459,7 +508,7 @@ mod tests {
             .with_io_timeout(Duration::from_secs(1));
         let timeout_acc = timeout_layer.layer(acc);
 
-        let (_, mut lister) = Accessor::list(&timeout_acc, "test", OpList::default())
+        let (_, mut lister) = Access::list(&timeout_acc, "test", OpList::default())
             .await
             .unwrap();
 

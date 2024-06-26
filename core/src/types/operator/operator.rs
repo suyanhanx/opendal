@@ -35,11 +35,12 @@ use crate::*;
 /// We will usually do some general checks and data transformations in this layer,
 /// like normalizing path from input, checking whether the path refers to one file or one directory,
 /// and so on.
-/// Read [`Operator::concepts`][docs::concepts] for more about [`Operator::Operator`].
+///
+/// Read [`concepts`][crate::docs::concepts] for more about [`Operator`].
 ///
 /// # Examples
 ///
-/// Read more backend init examples in [`Operator::services`]
+/// Read more backend init examples in [`services`]
 ///
 /// ```
 /// # use anyhow::Result;
@@ -62,28 +63,34 @@ use crate::*;
 #[derive(Clone, Debug)]
 pub struct Operator {
     // accessor is what Operator delegates for
-    accessor: FusedAccessor,
+    accessor: Accessor,
 
     // limit is usually the maximum size of data that operator will handle in one operation
     limit: usize,
+    /// The default executor that used to run futures in background.
+    default_executor: Option<Executor>,
 }
 
 /// # Operator basic API.
 impl Operator {
-    pub(super) fn inner(&self) -> &FusedAccessor {
+    pub(crate) fn inner(&self) -> &Accessor {
         &self.accessor
     }
 
-    pub(crate) fn from_inner(accessor: FusedAccessor) -> Self {
+    pub(crate) fn from_inner(accessor: Accessor) -> Self {
         let limit = accessor
             .info()
             .full_capability()
             .batch_max_operations
             .unwrap_or(1000);
-        Self { accessor, limit }
+        Self {
+            accessor,
+            limit,
+            default_executor: None,
+        }
     }
 
-    pub(super) fn into_inner(self) -> FusedAccessor {
+    pub(crate) fn into_inner(self) -> Accessor {
         self.accessor
     }
 
@@ -99,6 +106,18 @@ impl Operator {
     pub fn with_limit(&self, limit: usize) -> Self {
         let mut op = self.clone();
         op.limit = limit;
+        op
+    }
+
+    /// Get the default executor.
+    pub fn default_executor(&self) -> Option<Executor> {
+        self.default_executor.clone()
+    }
+
+    /// Specify the default executor.
+    pub fn with_default_executor(&self, executor: Executor) -> Self {
+        let mut op = self.clone();
+        op.default_executor = Some(executor);
         op
     }
 
@@ -164,7 +183,7 @@ impl Operator {
     ///
     /// ## Reuse Metadata
     ///
-    /// For fetch metadata of entries returned by [`Operator::Lister`], it's better to use
+    /// For fetch metadata of entries returned by [`Lister`], it's better to use
     /// [`Operator::list_with`] and [`Operator::lister_with`] with `metakey` query like
     /// `Metakey::ContentLength | Metakey::LastModified` so that we can avoid extra stat requests.
     ///
@@ -197,7 +216,7 @@ impl Operator {
     ///
     /// ## Reuse Metadata
     ///
-    /// For fetch metadata of entries returned by [`Operator::Lister`], it's better to use
+    /// For fetch metadata of entries returned by [`Lister`], it's better to use
     /// [`Operator::list_with`] and [`Operator::lister_with`] with `metakey` query like
     /// `Metakey::ContentLength | Metakey::LastModified` so that we can avoid extra requests.
     ///
@@ -536,7 +555,10 @@ impl Operator {
         OperatorFuture::new(
             self.inner().clone(),
             path,
-            (OpRead::default(), OpReader::default()),
+            (
+                OpRead::default().merge_executor(self.default_executor.clone()),
+                OpReader::default(),
+            ),
             |inner, path, (args, options)| async move {
                 if !validate_path(&path, EntryMode::FILE) {
                     return Err(
@@ -547,8 +569,9 @@ impl Operator {
                     );
                 }
 
-                let range = options.range();
-                let r = Reader::create(inner, &path, args, options).await?;
+                let range = args.range();
+                let context = ReadContext::new(inner, path, args, options);
+                let r = Reader::new(context);
                 let buf = r.read(range.to_range()).await?;
                 Ok(buf)
             },
@@ -623,7 +646,10 @@ impl Operator {
     /// # use opendal::Operator;
     /// # use opendal::Scheme;
     /// # async fn test(op: Operator) -> Result<()> {
-    /// let r = op.reader_with("path/to/file").chunk(4 * 1024 * 1024).await?;
+    /// let r = op
+    ///     .reader_with("path/to/file")
+    ///     .chunk(4 * 1024 * 1024)
+    ///     .await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -645,7 +671,10 @@ impl Operator {
         OperatorFuture::new(
             self.inner().clone(),
             path,
-            (OpRead::default(), OpReader::default()),
+            (
+                OpRead::default().merge_executor(self.default_executor.clone()),
+                OpReader::default(),
+            ),
             |inner, path, (args, options)| async move {
                 if !validate_path(&path, EntryMode::FILE) {
                     return Err(
@@ -656,7 +685,8 @@ impl Operator {
                     );
                 }
 
-                Reader::create(inner.clone(), &path, args, options).await
+                let context = ReadContext::new(inner, path, args, options);
+                Ok(Reader::new(context))
             },
         )
     }
@@ -822,20 +852,22 @@ impl Operator {
     ///
     /// ## Extra Options
     ///
-    /// [`Operator::write`] is a wrapper of [`Operator::write_with`] without any options. To use
-    /// extra options like `content_type` and `cache_control`, please use [`Operator::write_with`]
+    /// [`Operator::writer`] is a wrapper of [`Operator::writer_with`] without any options. To use
+    /// extra options like `content_type` and `cache_control`, please use [`Operator::writer_with`]
     /// instead.
     ///
     /// ## Chunk
     ///
-    /// OpenDAL is designed to write files directly without chunking by default, giving users
-    /// control over the exact size of their writes and helping avoid unnecessary costs.
+    /// Some storage services have a minimum chunk size requirement. For example, `s3` could return
+    /// hard errors like `EntityTooSmall` if the chunk size is too small. Some services like `gcs`
+    /// also return errors if the chunk size is not aligned. Besides, cloud storage services will cost
+    /// more money if we write data in small chunks.
     ///
-    /// This is not efficient for cases when users write small chunks of data. Some storage services
-    /// like `s3` could even return hard errors like `EntityTooSmall`. Besides, cloud storage services
-    /// will cost more money if we write data in small chunks.
+    /// OpenDAL sets the chunk size automatically based on the [Capability](crate::types::Capability)
+    /// of the service if users don't set it. Users can set `chunk` to control the exact size to send
+    /// to the storage service.
     ///
-    /// Users can use [`Operator::write_with`] to set a good chunk size might improve the performance,
+    /// Users can use [`Operator::writer_with`] to set a good chunk size might improve the performance,
     ///
     /// # Examples
     ///
@@ -889,12 +921,14 @@ impl Operator {
     ///
     /// Set `chunk` for the writer.
     ///
-    /// OpenDAL is designed to write files directly without chunking by default, giving users
-    /// control over the exact size of their writes and helping avoid unnecessary costs.
+    /// Some storage services have a minimum chunk size requirement. For example, `s3` could return
+    /// hard errors like `EntityTooSmall` if the chunk size is too small. Some services like `gcs`
+    /// also return errors if the chunk size is not aligned. Besides, cloud storage services will cost
+    /// more money if we write data in small chunks.
     ///
-    /// This is not efficient for cases when users write small chunks of data. Some storage services
-    /// like `s3` could even return hard errors like `EntityTooSmall`. Besides, cloud storage services
-    /// will cost more money if we write data in small chunks.
+    /// OpenDAL sets the chunk size automatically based on the [Capability](crate::types::Capability)
+    /// of the service if users don't set it. Users can set `chunk` to control the exact size to send
+    /// to the storage service.
     ///
     /// Set a good chunk size might improve the performance, reduce the API calls and save money.
     ///
@@ -1049,7 +1083,7 @@ impl Operator {
         OperatorFuture::new(
             self.inner().clone(),
             path,
-            OpWrite::default(),
+            OpWrite::default().merge_executor(self.default_executor.clone()),
             |inner, path, args| async move {
                 if !validate_path(&path, EntryMode::FILE) {
                     return Err(
@@ -1193,7 +1227,10 @@ impl Operator {
         OperatorFuture::new(
             self.inner().clone(),
             path,
-            (OpWrite::default(), bs),
+            (
+                OpWrite::default().merge_executor(self.default_executor.clone()),
+                bs,
+            ),
             |inner, path, (args, bs)| async move {
                 if !validate_path(&path, EntryMode::FILE) {
                     return Err(
@@ -1368,20 +1405,23 @@ impl Operator {
     /// # }
     /// ```
     pub async fn remove_all(&self, path: &str) -> Result<()> {
-        let meta = match self.stat(path).await {
+        match self.stat(path).await {
             // If object exists.
-            Ok(metadata) => metadata,
+            Ok(metadata) => {
+                // If the object is a file, we can delete it.
+                if metadata.mode() != EntryMode::DIR {
+                    self.delete(path).await?;
+                    // There may still be objects prefixed with the path in some backend, so we can't return here.
+                }
+            }
 
-            // If object not found, return success.
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+            // If dir not found, it may be a prefix in object store like S3,
+            // and we still need to delete objects under the prefix.
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
 
             // Pass on any other error.
             Err(e) => return Err(e),
         };
-
-        if meta.mode() != EntryMode::DIR {
-            return self.delete(path).await;
-        }
 
         let obs = self.lister_with(path).recursive(true).await?;
 
@@ -1668,8 +1708,8 @@ impl Operator {
 
     /// List entries that starts with given `path` in parent dir.
     ///
-    /// This function will create a new [`Operator::Lister`] to list entries. Users can stop
-    /// listing via dropping this [`Operator::Lister`].
+    /// This function will create a new [`Lister`] to list entries. Users can stop
+    /// listing via dropping this [`Lister`].
     ///
     /// # Notes
     ///
@@ -1715,8 +1755,8 @@ impl Operator {
 
     /// List entries that starts with given `path` in parent dir with options.
     ///
-    /// This function will create a new [`Operator::Lister`] to list entries. Users can stop listing via
-    /// dropping this [`Operator::Lister`].
+    /// This function will create a new [`Lister`] to list entries. Users can stop listing via
+    /// dropping this [`Lister`].
     ///
     /// # Options
     ///

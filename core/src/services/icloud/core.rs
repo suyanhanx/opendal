@@ -20,7 +20,6 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Buf;
 use bytes::Bytes;
 use http::header;
@@ -374,7 +373,7 @@ impl IcloudCore {
         zone: &str,
         range: BytesRange,
         args: OpRead,
-    ) -> Result<Response<Buffer>> {
+    ) -> Result<Response<HttpBody>> {
         let mut signer = self.signer.lock().await;
 
         let uri = format!(
@@ -414,7 +413,7 @@ impl IcloudCore {
 
         let req = req.body(Buffer::new()).map_err(new_request_build_error)?;
 
-        let resp = signer.client.send(req).await?;
+        let resp = signer.client.fetch(req).await?;
 
         Ok(resp)
     }
@@ -424,13 +423,13 @@ impl IcloudCore {
         path: &str,
         range: BytesRange,
         args: &OpRead,
-    ) -> Result<Response<Buffer>> {
+    ) -> Result<Response<HttpBody>> {
         let path = build_rooted_abs_path(&self.root, path);
         let base = get_basename(&path);
 
         let path_id = self.path_cache.get(base).await?.ok_or(Error::new(
             ErrorKind::NotFound,
-            &format!("read path not found: {}", base),
+            format!("read path not found: {}", base),
         ))?;
 
         if let Some(docwsid) = path_id.strip_prefix("FILE::com.apple.CloudDocs::") {
@@ -457,12 +456,12 @@ impl IcloudCore {
 
         let file_id = self.path_cache.get(base).await?.ok_or(Error::new(
             ErrorKind::NotFound,
-            &format!("stat path not found: {}", base),
+            format!("stat path not found: {}", base),
         ))?;
 
         let folder_id = self.path_cache.get(parent).await?.ok_or(Error::new(
             ErrorKind::NotFound,
-            &format!("stat path not found: {}", parent),
+            format!("stat path not found: {}", parent),
         ))?;
 
         let node = self.get_root(&folder_id).await?;
@@ -487,7 +486,6 @@ impl IcloudPathQuery {
     }
 }
 
-#[async_trait]
 impl PathQuery for IcloudPathQuery {
     async fn root(&self) -> Result<String> {
         Ok("FOLDER::com.apple.CloudDocs::root".to_string())
@@ -592,7 +590,7 @@ pub async fn parse_error(resp: Response<Buffer>) -> Result<Error> {
         }
     }
 
-    let mut err = Error::new(kind, &message);
+    let mut err = Error::new(kind, message);
 
     err = with_error_response_context(err, parts);
 
@@ -625,16 +623,12 @@ pub struct Webservices {
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Drivews {
-    pub pcs_required: bool,
-    pub status: String,
     pub url: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Docws {
-    pub pcs_required: bool,
-    pub status: String,
     pub url: Option<String>,
 }
 

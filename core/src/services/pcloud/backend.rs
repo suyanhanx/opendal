@@ -20,8 +20,8 @@ use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Buf;
+use http::Response;
 use http::StatusCode;
 use log::debug;
 use serde::Deserialize;
@@ -33,7 +33,6 @@ use super::lister::PcloudLister;
 use super::writer::PcloudWriter;
 use super::writer::PcloudWriters;
 use crate::raw::*;
-use crate::services::pcloud::reader::PcloudReader;
 use crate::*;
 
 /// Config for backblaze Pcloud services support.
@@ -98,7 +97,7 @@ impl PcloudBuilder {
     }
 
     /// Pcloud endpoint.
-    /// https://api.pcloud.com for United States and https://eapi.pcloud.com for Europe
+    /// <https://api.pcloud.com> for United States and <https://eapi.pcloud.com> for Europe
     /// ref to [doc.pcloud.com](https://docs.pcloud.com/)
     ///
     /// It is required. e.g. `https://api.pcloud.com`
@@ -228,9 +227,8 @@ pub struct PcloudBackend {
     core: Arc<PcloudCore>,
 }
 
-#[async_trait]
-impl Accessor for PcloudBackend {
-    type Reader = PcloudReader;
+impl Access for PcloudBackend {
+    type Reader = HttpBody;
     type Writer = PcloudWriters;
     type Lister = oio::PageLister<PcloudLister>;
     type BlockingReader = ();
@@ -279,10 +277,10 @@ impl Accessor for PcloudBackend {
                     serde_json::from_reader(bs.reader()).map_err(new_json_deserialize_error)?;
                 let result = resp.result;
                 if result == 2010 || result == 2055 || result == 2002 {
-                    return Err(Error::new(ErrorKind::NotFound, &format!("{resp:?}")));
+                    return Err(Error::new(ErrorKind::NotFound, format!("{resp:?}")));
                 }
                 if result != 0 {
-                    return Err(Error::new(ErrorKind::Unexpected, &format!("{resp:?}")));
+                    return Err(Error::new(ErrorKind::Unexpected, format!("{resp:?}")));
                 }
 
                 if let Some(md) = resp.metadata {
@@ -290,7 +288,7 @@ impl Accessor for PcloudBackend {
                     return md.map(RpStat::new);
                 }
 
-                Err(Error::new(ErrorKind::Unexpected, &format!("{resp:?}")))
+                Err(Error::new(ErrorKind::Unexpected, format!("{resp:?}")))
             }
             _ => Err(parse_error(resp).await?),
         }
@@ -299,10 +297,20 @@ impl Accessor for PcloudBackend {
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
         let link = self.core.get_file_link(path).await?;
 
-        Ok((
-            RpRead::default(),
-            PcloudReader::new(self.core.clone(), &link, args),
-        ))
+        let resp = self.core.download(&link, args.range()).await?;
+
+        let status = resp.status();
+
+        match status {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => {
+                Ok((RpRead::default(), resp.into_body()))
+            }
+            _ => {
+                let (part, mut body) = resp.into_parts();
+                let buf = body.to_buffer().await?;
+                Err(parse_error(Response::from_parts(part, buf)).await?)
+            }
+        }
     }
 
     async fn write(&self, path: &str, _args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -331,7 +339,7 @@ impl Accessor for PcloudBackend {
 
                 // pCloud returns 2005 or 2009 if the file or folder is not found
                 if result != 0 && result != 2005 && result != 2009 {
-                    return Err(Error::new(ErrorKind::Unexpected, &format!("{resp:?}")));
+                    return Err(Error::new(ErrorKind::Unexpected, format!("{resp:?}")));
                 }
 
                 Ok(RpDelete::default())
@@ -363,10 +371,10 @@ impl Accessor for PcloudBackend {
                     serde_json::from_reader(bs.reader()).map_err(new_json_deserialize_error)?;
                 let result = resp.result;
                 if result == 2009 || result == 2010 || result == 2055 || result == 2002 {
-                    return Err(Error::new(ErrorKind::NotFound, &format!("{resp:?}")));
+                    return Err(Error::new(ErrorKind::NotFound, format!("{resp:?}")));
                 }
                 if result != 0 {
-                    return Err(Error::new(ErrorKind::Unexpected, &format!("{resp:?}")));
+                    return Err(Error::new(ErrorKind::Unexpected, format!("{resp:?}")));
                 }
 
                 Ok(RpCopy::default())
@@ -393,10 +401,10 @@ impl Accessor for PcloudBackend {
                     serde_json::from_reader(bs.reader()).map_err(new_json_deserialize_error)?;
                 let result = resp.result;
                 if result == 2009 || result == 2010 || result == 2055 || result == 2002 {
-                    return Err(Error::new(ErrorKind::NotFound, &format!("{resp:?}")));
+                    return Err(Error::new(ErrorKind::NotFound, format!("{resp:?}")));
                 }
                 if result != 0 {
-                    return Err(Error::new(ErrorKind::Unexpected, &format!("{resp:?}")));
+                    return Err(Error::new(ErrorKind::Unexpected, format!("{resp:?}")));
                 }
 
                 Ok(RpRename::default())
