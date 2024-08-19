@@ -15,21 +15,29 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 
 use dashmap::DashMap;
 use serde::Deserialize;
+use serde::Serialize;
 
 use crate::raw::adapters::typed_kv;
-use crate::raw::ConfigDeserializer;
+use crate::raw::Access;
 use crate::*;
 
 /// [dashmap](https://github.com/xacrimon/dashmap) backend support.
-#[derive(Default, Deserialize, Clone, Debug)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct DashmapConfig {
-    root: Option<String>,
+    /// The root path for dashmap.
+    pub root: Option<String>,
+}
+
+impl Configurator for DashmapConfig {
+    type Builder = DashmapBuilder;
+    fn into_builder(self) -> Self::Builder {
+        DashmapBuilder { config: self }
+    }
 }
 
 /// [dashmap](https://github.com/xacrimon/dashmap) backend support.
@@ -41,28 +49,30 @@ pub struct DashmapBuilder {
 
 impl DashmapBuilder {
     /// Set the root for dashmap.
-    pub fn root(&mut self, path: &str) -> &mut Self {
-        self.config.root = Some(path.into());
+    pub fn root(mut self, path: &str) -> Self {
+        self.config.root = if path.is_empty() {
+            None
+        } else {
+            Some(path.to_string())
+        };
+
         self
     }
 }
 
 impl Builder for DashmapBuilder {
     const SCHEME: Scheme = Scheme::Dashmap;
-    type Accessor = DashmapBackend;
+    type Config = DashmapConfig;
 
-    fn from_map(map: HashMap<String, String>) -> Self {
-        let config = DashmapConfig::deserialize(ConfigDeserializer::new(map))
-            .expect("config deserialize must succeed");
-
-        Self { config }
-    }
-
-    fn build(&mut self) -> Result<Self::Accessor> {
-        Ok(DashmapBackend::new(Adapter {
+    fn build(self) -> Result<impl Access> {
+        let mut backend = DashmapBackend::new(Adapter {
             inner: DashMap::default(),
-        })
-        .with_root(self.config.root.as_deref().unwrap_or_default()))
+        });
+        if let Some(v) = self.config.root {
+            backend = backend.with_root(&v);
+        }
+
+        Ok(backend)
     }
 }
 
@@ -144,7 +154,6 @@ impl typed_kv::Adapter for Adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raw::*;
 
     #[test]
     fn test_accessor_metadata_name() {

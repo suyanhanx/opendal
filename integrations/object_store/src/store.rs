@@ -15,9 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::future::IntoFuture;
 use std::ops::Range;
+use std::sync::Arc;
 
 use crate::utils::*;
 use async_trait::async_trait;
@@ -27,7 +28,6 @@ use futures::FutureExt;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use object_store::path::Path;
-use object_store::GetOptions;
 use object_store::GetResult;
 use object_store::GetResultPayload;
 use object_store::ListResult;
@@ -38,8 +38,11 @@ use object_store::PutMultipartOpts;
 use object_store::PutOptions;
 use object_store::PutPayload;
 use object_store::PutResult;
-use opendal::Operator;
+use object_store::{GetOptions, UploadPart};
+use opendal::Writer;
 use opendal::{Buffer, Metakey};
+use opendal::{Operator, OperatorInfo};
+use tokio::sync::{Mutex, Notify};
 
 /// OpendalStore implements ObjectStore trait by using opendal.
 ///
@@ -68,7 +71,7 @@ use opendal::{Buffer, Metakey};
 ///         ]
 ///         .into_iter()
 ///         .collect(),
-///     );
+///     ).unwrap();
 ///
 ///     // Create a new operator
 ///     let operator = Operator::new(builder).unwrap().finish();
@@ -93,24 +96,37 @@ use opendal::{Buffer, Metakey};
 /// }
 /// ```
 pub struct OpendalStore {
+    info: Arc<OperatorInfo>,
     inner: Operator,
 }
 
 impl OpendalStore {
     /// Create OpendalStore by given Operator.
     pub fn new(op: Operator) -> Self {
-        Self { inner: op }
+        Self {
+            info: op.info().into(),
+            inner: op,
+        }
+    }
+
+    /// The metakey that requested by object_store, should align with its meta.
+    #[inline]
+    fn metakey() -> flagset::FlagSet<Metakey> {
+        Metakey::Mode
+            | Metakey::LastModified
+            | Metakey::ContentLength
+            | Metakey::Etag
+            | Metakey::Version
     }
 }
 
 impl Debug for OpendalStore {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let info = self.inner.info();
         f.debug_struct("OpendalStore")
-            .field("scheme", &info.scheme())
-            .field("name", &info.name())
-            .field("root", &info.root())
-            .field("capability", &info.full_capability())
+            .field("scheme", &self.info.scheme())
+            .field("name", &self.info.name())
+            .field("root", &self.info.root())
+            .field("capability", &self.info.full_capability())
             .finish()
     }
 }
@@ -164,14 +180,18 @@ impl ObjectStore for OpendalStore {
 
     async fn put_multipart(
         &self,
-        _location: &Path,
+        location: &Path,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        Err(object_store::Error::NotSupported {
-            source: Box::new(opendal::Error::new(
-                opendal::ErrorKind::Unsupported,
-                "put_multipart is not implemented so far",
-            )),
-        })
+        let writer = self
+            .inner
+            .writer_with(location.as_ref())
+            .concurrent(8)
+            .into_send()
+            .await
+            .map_err(|err| format_object_store_error(err, location.as_ref()))?;
+        let upload = OpendalMultipartUpload::new(writer, location.clone());
+
+        Ok(Box::new(upload))
     }
 
     async fn put_multipart_opts(
@@ -293,7 +313,7 @@ impl ObjectStore for OpendalStore {
             let stream = self
                 .inner
                 .lister_with(&path)
-                .metakey(Metakey::ContentLength | Metakey::LastModified)
+                .metakey(Self::metakey())
                 .recursive(true)
                 .await
                 .map_err(|err| format_object_store_error(err, &path))?;
@@ -323,7 +343,7 @@ impl ObjectStore for OpendalStore {
                 self.inner
                     .lister_with(&path)
                     .start_after(offset.as_ref())
-                    .metakey(Metakey::ContentLength | Metakey::LastModified)
+                    .metakey(Self::metakey())
                     .recursive(true)
                     .into_future()
                     .into_send()
@@ -335,7 +355,7 @@ impl ObjectStore for OpendalStore {
             } else {
                 self.inner
                     .lister_with(&path)
-                    .metakey(Metakey::ContentLength | Metakey::LastModified)
+                    .metakey(Self::metakey())
                     .recursive(true)
                     .into_future()
                     .into_send()
@@ -357,7 +377,7 @@ impl ObjectStore for OpendalStore {
         let mut stream = self
             .inner
             .lister_with(&path)
-            .metakey(Metakey::Mode | Metakey::ContentLength | Metakey::LastModified)
+            .metakey(Self::metakey())
             .into_future()
             .into_send()
             .await
@@ -412,13 +432,103 @@ impl ObjectStore for OpendalStore {
     }
 }
 
+/// `MultipartUpload`'s impl based on `Writer` in opendal
+///
+/// # Notes
+///
+/// OpenDAL writer can handle concurrent internally we don't generate real `UploadPart` like existing
+/// implementation do. Instead, we just write the part and notify the next task to be written.
+///
+/// The lock here doesn't really involve the write process, it's just for the notify mechanism.
+struct OpendalMultipartUpload {
+    writer: Arc<Mutex<Writer>>,
+    location: Path,
+    next_notify: Option<Arc<Notify>>,
+}
+
+impl OpendalMultipartUpload {
+    fn new(writer: Writer, location: Path) -> Self {
+        Self {
+            writer: Arc::new(Mutex::new(writer)),
+            location,
+            next_notify: None,
+        }
+    }
+}
+
+#[async_trait]
+impl MultipartUpload for OpendalMultipartUpload {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        let writer = self.writer.clone();
+        let location = self.location.clone();
+
+        // Generate next notify which will be notified after the current part is written.
+        let next_notify = Arc::new(Notify::new());
+        // Fetch the notify for current part to wait for it to be written.
+        let current_notify = self.next_notify.replace(next_notify.clone());
+
+        async move {
+            // current_notify == None means that it's the first part, we don't need to wait.
+            if let Some(notify) = current_notify {
+                // Wait for the previous part to be written
+                notify.notified().await;
+            }
+
+            let mut writer = writer.lock().await;
+            let result = writer
+                .write(Buffer::from_iter(data.into_iter()))
+                .await
+                .map_err(|err| format_object_store_error(err, location.as_ref()));
+
+            // Notify the next part to be written
+            next_notify.notify_one();
+
+            result
+        }
+        .into_send()
+        .boxed()
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        let mut writer = self.writer.lock().await;
+        writer
+            .close()
+            .into_send()
+            .await
+            .map_err(|err| format_object_store_error(err, self.location.as_ref()))?;
+
+        Ok(PutResult {
+            e_tag: None,
+            version: None,
+        })
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        let mut writer = self.writer.lock().await;
+        writer
+            .abort()
+            .into_send()
+            .await
+            .map_err(|err| format_object_store_error(err, self.location.as_ref()))
+    }
+}
+
+impl Debug for OpendalMultipartUpload {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpendalMultipartUpload")
+            .field("location", &self.location)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, WriteMultipart};
     use opendal::services;
+    use rand::prelude::*;
 
     use super::*;
 
@@ -462,6 +572,59 @@ mod tests {
                 .unwrap(),
             bytes
         );
+    }
+
+    #[tokio::test]
+    async fn test_put_multipart() {
+        let op = Operator::new(services::Memory::default()).unwrap().finish();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(OpendalStore::new(op));
+
+        let mut rng = thread_rng();
+
+        // Case complete
+        let path: Path = "data/test_complete.txt".into();
+        let upload = object_store.put_multipart(&path).await.unwrap();
+
+        let mut write = WriteMultipart::new(upload);
+
+        let mut all_bytes = vec![];
+        let round = rng.gen_range(1..=1024);
+        for _ in 0..round {
+            let size = rng.gen_range(1..=1024);
+            let mut bytes = vec![0; size];
+            rng.fill_bytes(&mut bytes);
+
+            all_bytes.extend_from_slice(&bytes);
+            write.put(bytes.into());
+        }
+
+        let _ = write.finish().await.unwrap();
+
+        let meta = object_store.head(&path).await.unwrap();
+
+        assert_eq!(meta.size, all_bytes.len());
+
+        assert_eq!(
+            object_store
+                .get(&path)
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from(all_bytes)
+        );
+
+        // Case abort
+        let path: Path = "data/test_abort.txt".into();
+        let mut upload = object_store.put_multipart(&path).await.unwrap();
+        upload.put_part(vec![1; 1024].into()).await.unwrap();
+        upload.abort().await.unwrap();
+
+        let res = object_store.head(&path).await;
+        let err = res.unwrap_err();
+
+        assert!(matches!(err, object_store::Error::NotFound { .. }))
     }
 
     #[tokio::test]

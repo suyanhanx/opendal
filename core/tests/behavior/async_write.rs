@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use bytes::Bytes;
 use futures::io::BufReader;
@@ -42,7 +44,9 @@ pub fn tests(op: &Operator, tests: &mut Vec<Trial>) {
             test_write_with_cache_control,
             test_write_with_content_type,
             test_write_with_content_disposition,
+            test_write_with_user_metadata,
             test_writer_write,
+            test_writer_write_with_overwrite,
             test_writer_write_with_concurrent,
             test_writer_sink,
             test_writer_sink_with_concurrent,
@@ -200,6 +204,29 @@ pub async fn test_write_with_content_disposition(op: Operator) -> Result<()> {
         target_content_disposition
     );
     assert_eq!(meta.content_length(), size as u64);
+
+    Ok(())
+}
+
+/// write a single file with user defined metadata should succeed.
+pub async fn test_write_with_user_metadata(op: Operator) -> Result<()> {
+    if !op.info().full_capability().write_with_user_metadata {
+        return Ok(());
+    }
+
+    let (path, content, _) = TEST_FIXTURE.new_file(op.clone());
+    let target_user_metadata = vec![("location".to_string(), "everywhere".to_string())];
+    op.write_with(&path, content)
+        .user_metadata(target_user_metadata.clone())
+        .await?;
+
+    let meta = op.stat(&path).await.expect("stat must succeed");
+    let resp_meta = meta.user_metadata().expect("meta data must exist");
+
+    assert_eq!(
+        *resp_meta,
+        target_user_metadata.into_iter().collect::<HashMap<_, _>>()
+    );
 
     Ok(())
 }
@@ -556,6 +583,42 @@ pub async fn test_writer_with_append(op: Operator) -> Result<()> {
         format!("{:x}", Sha256::digest(&bs[..size])),
         format!("{:x}", Sha256::digest(content)),
         "read content"
+    );
+
+    op.delete(&path).await.expect("delete must succeed");
+    Ok(())
+}
+
+pub async fn test_writer_write_with_overwrite(op: Operator) -> Result<()> {
+    // ghac does not support overwrite
+    if op.info().scheme() == Scheme::Ghac {
+        return Ok(());
+    }
+
+    let path = uuid::Uuid::new_v4().to_string();
+    let (content_one, _) = gen_bytes(op.info().full_capability());
+    let (content_two, _) = gen_bytes(op.info().full_capability());
+
+    op.write(&path, content_one.clone()).await?;
+    let bs = op.read(&path).await?.to_bytes();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bs)),
+        format!("{:x}", Sha256::digest(&content_one)),
+        "read content_one"
+    );
+    op.write(&path, content_two.clone())
+        .await
+        .expect("write overwrite must succeed");
+    let bs = op.read(&path).await?.to_bytes();
+    assert_ne!(
+        format!("{:x}", Sha256::digest(&bs)),
+        format!("{:x}", Sha256::digest(&content_one)),
+        "content_one must be overwrote"
+    );
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&bs)),
+        format!("{:x}", Sha256::digest(&content_two)),
+        "read content_two"
     );
 
     op.delete(&path).await.expect("delete must succeed");

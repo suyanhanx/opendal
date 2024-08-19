@@ -15,7 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
@@ -23,6 +22,7 @@ use std::sync::Arc;
 use foundationdb::api::NetworkAutoStop;
 use foundationdb::Database;
 use serde::Deserialize;
+use serde::Serialize;
 
 use crate::raw::adapters::kv;
 use crate::raw::*;
@@ -34,17 +34,17 @@ use crate::*;
 
 /// [foundationdb](https://www.foundationdb.org/) service support.
 ///Config for FoundationDB.
-#[derive(Default, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 #[non_exhaustive]
-pub struct FoundationConfig {
+pub struct FoundationdbConfig {
     ///root of the backend.
     pub root: Option<String>,
     ///config_path for the backend.
     pub config_path: Option<String>,
 }
 
-impl Debug for FoundationConfig {
+impl Debug for FoundationdbConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut ds = f.debug_struct("FoundationConfig");
 
@@ -55,21 +55,28 @@ impl Debug for FoundationConfig {
     }
 }
 
+impl Configurator for FoundationdbConfig {
+    type Builder = FoundationdbBuilder;
+    fn into_builder(self) -> Self::Builder {
+        FoundationdbBuilder { config: self }
+    }
+}
+
 #[doc = include_str!("docs.md")]
 #[derive(Default)]
 pub struct FoundationdbBuilder {
-    config: FoundationConfig,
+    config: FoundationdbConfig,
 }
 
 impl FoundationdbBuilder {
     /// Set the root for Foundationdb.
-    pub fn root(&mut self, path: &str) -> &mut Self {
+    pub fn root(mut self, path: &str) -> Self {
         self.config.root = Some(path.into());
         self
     }
 
     /// Set the config path for Foundationdb. If not set, will fallback to use default
-    pub fn config_path(&mut self, path: &str) -> &mut Self {
+    pub fn config_path(mut self, path: &str) -> Self {
         self.config.config_path = Some(path.into());
         self
     }
@@ -77,16 +84,9 @@ impl FoundationdbBuilder {
 
 impl Builder for FoundationdbBuilder {
     const SCHEME: Scheme = Scheme::Foundationdb;
-    type Accessor = FoundationdbBackend;
+    type Config = FoundationdbConfig;
 
-    fn from_map(map: HashMap<String, String>) -> Self {
-        let config = FoundationConfig::deserialize(ConfigDeserializer::new(map))
-            .expect("config deserialize must succeed");
-
-        Self { config }
-    }
-
-    fn build(&mut self) -> Result<Self::Accessor> {
+    fn build(self) -> Result<impl Access> {
         let _network = Arc::new(unsafe { foundationdb::boot() });
         let db;
         if let Some(cfg_path) = &self.config.config_path {

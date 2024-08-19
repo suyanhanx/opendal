@@ -31,13 +31,11 @@ use prometheus::register_int_counter_vec_with_registry;
 use prometheus::HistogramVec;
 use prometheus::Registry;
 
-use crate::raw::oio::ReadOperation;
-use crate::raw::oio::WriteOperation;
 use crate::raw::Access;
 use crate::raw::*;
 use crate::*;
 
-/// Add [prometheus](https://docs.rs/prometheus) for every operations.
+/// Add [prometheus](https://docs.rs/prometheus) for every operation.
 ///
 /// # Prometheus Metrics
 ///
@@ -681,7 +679,7 @@ impl<R: oio::Read> oio::Read for PrometheusMetricWrapper<R> {
     async fn read(&mut self) -> Result<Buffer> {
         let labels = self.stats.generate_metric_label(
             self.scheme.into_static(),
-            ReadOperation::Read.into_static(),
+            Operation::ReaderRead.into_static(),
             &self.path,
         );
 
@@ -713,7 +711,7 @@ impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
     fn read(&mut self) -> Result<Buffer> {
         let labels = self.stats.generate_metric_label(
             self.scheme.into_static(),
-            ReadOperation::BlockingRead.into_static(),
+            Operation::BlockingReaderRead.into_static(),
             &self.path,
         );
 
@@ -742,10 +740,12 @@ impl<R: oio::BlockingRead> oio::BlockingRead for PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
-    async fn write(&mut self, bs: Buffer) -> Result<usize> {
+    async fn write(&mut self, bs: Buffer) -> Result<()> {
+        let size = bs.len();
+
         let labels = self.stats.generate_metric_label(
             self.scheme.into_static(),
-            WriteOperation::Write.into_static(),
+            Operation::WriterWrite.into_static(),
             &self.path,
         );
 
@@ -758,12 +758,12 @@ impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
         timer.observe_duration();
 
         match res {
-            Ok(n) => {
+            Ok(_) => {
                 self.stats
                     .bytes_total
                     .with_label_values(&labels)
-                    .observe(n as f64);
-                Ok(n)
+                    .observe(size as f64);
+                Ok(())
             }
             Err(err) => {
                 self.stats.increment_errors_total(self.op, err.kind());
@@ -775,7 +775,7 @@ impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
     async fn abort(&mut self) -> Result<()> {
         let labels = self.stats.generate_metric_label(
             self.scheme.into_static(),
-            WriteOperation::Abort.into_static(),
+            Operation::WriterAbort.into_static(),
             &self.path,
         );
 
@@ -799,7 +799,7 @@ impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
     async fn close(&mut self) -> Result<()> {
         let labels = self.stats.generate_metric_label(
             self.scheme.into_static(),
-            WriteOperation::Close.into_static(),
+            Operation::WriterClose.into_static(),
             &self.path,
         );
 
@@ -822,7 +822,9 @@ impl<R: oio::Write> oio::Write for PrometheusMetricWrapper<R> {
 }
 
 impl<R: oio::BlockingWrite> oio::BlockingWrite for PrometheusMetricWrapper<R> {
-    fn write(&mut self, bs: Buffer) -> Result<usize> {
+    fn write(&mut self, bs: Buffer) -> Result<()> {
+        let size = bs.len();
+
         let labels = self.stats.generate_metric_label(
             self.scheme.into_static(),
             Operation::BlockingWrite.into_static(),
@@ -838,12 +840,12 @@ impl<R: oio::BlockingWrite> oio::BlockingWrite for PrometheusMetricWrapper<R> {
         timer.observe_duration();
 
         match res {
-            Ok(n) => {
+            Ok(_) => {
                 self.stats
                     .bytes_total
                     .with_label_values(&labels)
-                    .observe(n as f64);
-                Ok(n)
+                    .observe(size as f64);
+                Ok(())
             }
             Err(err) => {
                 self.stats.increment_errors_total(self.op, err.kind());
@@ -855,7 +857,7 @@ impl<R: oio::BlockingWrite> oio::BlockingWrite for PrometheusMetricWrapper<R> {
     fn close(&mut self) -> Result<()> {
         let labels = self.stats.generate_metric_label(
             self.scheme.into_static(),
-            WriteOperation::BlockingClose.into_static(),
+            Operation::BlockingWriterClose.into_static(),
             &self.path,
         );
 

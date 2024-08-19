@@ -22,7 +22,7 @@ name: Release Rust Packages
 on:
   push:
     tags:
-      - '*'
+      - "*"
   pull_request:
     branches:
       - main
@@ -42,10 +42,10 @@ jobs:
         package:
           - "core"
           - "integrations/object_store"
+          - "integrations/parquet"
           - "integrations/dav-server"
           - "integrations/fuse3"
           - "integrations/unftp-sbe"
-          - "integrations/virtiofs"
           - "bin/oay" # depends on integrations/dav-server
           - "bin/oli"
           - "bin/ofs" # depends on integrations/fuse3

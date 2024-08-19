@@ -33,6 +33,7 @@ mod immutable_index;
 pub use immutable_index::ImmutableIndexLayer;
 
 mod logging;
+pub use logging::LoggingInterceptor;
 pub use logging::LoggingLayer;
 
 mod timeout;
@@ -53,6 +54,11 @@ mod metrics;
 #[cfg(feature = "layers-metrics")]
 pub use self::metrics::MetricsLayer;
 
+#[cfg(feature = "layers-mime-guess")]
+mod mime_guess;
+#[cfg(feature = "layers-mime-guess")]
+pub use self::mime_guess::MimeGuessLayer;
+
 #[cfg(feature = "layers-prometheus")]
 mod prometheus;
 #[cfg(feature = "layers-prometheus")]
@@ -72,17 +78,10 @@ mod tracing;
 #[cfg(feature = "layers-tracing")]
 pub use self::tracing::TracingLayer;
 
-#[cfg(feature = "layers-minitrace")]
-mod minitrace;
-#[cfg(feature = "layers-minitrace")]
-pub use self::minitrace::MinitraceLayer;
-
-#[cfg(feature = "layers-madsim")]
-mod madsim;
-#[cfg(feature = "layers-madsim")]
-pub use self::madsim::MadsimLayer;
-#[cfg(feature = "layers-madsim")]
-pub use self::madsim::MadsimServer;
+#[cfg(feature = "layers-fastrace")]
+mod fastrace;
+#[cfg(feature = "layers-fastrace")]
+pub use self::fastrace::FastraceLayer;
 
 #[cfg(feature = "layers-otel-trace")]
 mod oteltrace;

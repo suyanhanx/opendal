@@ -40,6 +40,7 @@ use reqsign::AwsDefaultLoader;
 use reqsign::AwsV4Signer;
 use reqwest::Url;
 use serde::Deserialize;
+use serde::Serialize;
 
 use super::core::*;
 use super::error::parse_error;
@@ -64,7 +65,7 @@ static ENDPOINT_TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new
 const DEFAULT_BATCH_MAX_OPERATIONS: usize = 1000;
 
 /// Config for Aws S3 and compatible services (including minio, digitalocean space, Tencent Cloud Object Storage(COS) and so on) support.
-#[derive(Default, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct S3Config {
@@ -111,11 +112,11 @@ pub struct S3Config {
     /// - If secret_access_key is set, we will take user's input first.
     /// - If not, we will try to load it from environment.
     pub secret_access_key: Option<String>,
-    /// security_token (aka, session token) of this backend.
+    /// session_token (aka, security token) of this backend.
     ///
-    /// This token will expire after sometime, it's recommended to set security_token
+    /// This token will expire after sometime, it's recommended to set session_token
     /// by hand.
-    pub security_token: Option<String>,
+    pub session_token: Option<String>,
     /// role_arn for this backend.
     ///
     /// If `role_arn` is set, we will use already known config as source
@@ -123,6 +124,8 @@ pub struct S3Config {
     pub role_arn: Option<String>,
     /// external_id for this backend.
     pub external_id: Option<String>,
+    /// role_session_name for this backend.
+    pub role_session_name: Option<String>,
     /// Disable config load so that opendal will not load config from
     /// environment.
     ///
@@ -146,13 +149,13 @@ pub struct S3Config {
     /// server_side_encryption_aws_kms_key_id for this backend
     ///
     /// - If `server_side_encryption` set to `aws:kms`, and `server_side_encryption_aws_kms_key_id`
-    /// is not set, S3 will use aws managed kms key to encrypt data.
+    ///   is not set, S3 will use aws managed kms key to encrypt data.
     /// - If `server_side_encryption` set to `aws:kms`, and `server_side_encryption_aws_kms_key_id`
-    /// is a valid kms key id, S3 will use the provided kms key to encrypt data.
+    ///   is a valid kms key id, S3 will use the provided kms key to encrypt data.
     /// - If the `server_side_encryption_aws_kms_key_id` is invalid or not found, an error will be
-    /// returned.
+    ///   returned.
     /// - If `server_side_encryption` is not `aws:kms`, setting `server_side_encryption_aws_kms_key_id`
-    /// is a noop.
+    ///   is a noop.
     pub server_side_encryption_aws_kms_key_id: Option<String>,
     /// server_side_encryption_customer_algorithm for this backend.
     ///
@@ -224,6 +227,17 @@ impl Debug for S3Config {
     }
 }
 
+impl Configurator for S3Config {
+    type Builder = S3Builder;
+    fn into_builder(self) -> Self::Builder {
+        S3Builder {
+            config: self,
+            customized_credential_load: None,
+            http_client: None,
+        }
+    }
+}
+
 /// Aws S3 and compatible services (including minio, digitalocean space, Tencent Cloud Object Storage(COS) and so on) support.
 /// For more information about s3-compatible services, refer to [Compatible Services](#compatible-services).
 #[doc = include_str!("docs.md")]
@@ -232,7 +246,7 @@ impl Debug for S3Config {
 pub struct S3Builder {
     config: S3Config,
 
-    customed_credential_load: Option<Box<dyn AwsCredentialLoad>>,
+    customized_credential_load: Option<Box<dyn AwsCredentialLoad>>,
     http_client: Option<HttpClient>,
 }
 
@@ -249,7 +263,7 @@ impl S3Builder {
     /// Set root of this backend.
     ///
     /// All operations will happen under this root.
-    pub fn root(&mut self, root: &str) -> &mut Self {
+    pub fn root(mut self, root: &str) -> Self {
         self.config.root = if root.is_empty() {
             None
         } else {
@@ -260,7 +274,7 @@ impl S3Builder {
     }
 
     /// Set bucket name of this backend.
-    pub fn bucket(&mut self, bucket: &str) -> &mut Self {
+    pub fn bucket(mut self, bucket: &str) -> Self {
         self.config.bucket = bucket.to_string();
 
         self
@@ -278,7 +292,7 @@ impl S3Builder {
     ///
     /// If user inputs endpoint without scheme like "s3.amazonaws.com", we
     /// will prepend "https://" before it.
-    pub fn endpoint(&mut self, endpoint: &str) -> &mut Self {
+    pub fn endpoint(mut self, endpoint: &str) -> Self {
         if !endpoint.is_empty() {
             // Trim trailing `/` so that we can accept `http://127.0.0.1:9000/`
             self.config.endpoint = Some(endpoint.trim_end_matches('/').to_string())
@@ -293,7 +307,7 @@ impl S3Builder {
     /// If using a custom endpoint,
     /// - If region is set, we will take user's input first.
     /// - If not, we will try to load it from environment.
-    pub fn region(&mut self, region: &str) -> &mut Self {
+    pub fn region(mut self, region: &str) -> Self {
         if !region.is_empty() {
             self.config.region = Some(region.to_string())
         }
@@ -305,7 +319,7 @@ impl S3Builder {
     ///
     /// - If access_key_id is set, we will take user's input first.
     /// - If not, we will try to load it from environment.
-    pub fn access_key_id(&mut self, v: &str) -> &mut Self {
+    pub fn access_key_id(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.access_key_id = Some(v.to_string())
         }
@@ -317,7 +331,7 @@ impl S3Builder {
     ///
     /// - If secret_access_key is set, we will take user's input first.
     /// - If not, we will try to load it from environment.
-    pub fn secret_access_key(&mut self, v: &str) -> &mut Self {
+    pub fn secret_access_key(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.secret_access_key = Some(v.to_string())
         }
@@ -329,7 +343,7 @@ impl S3Builder {
     ///
     /// If `role_arn` is set, we will use already known config as source
     /// credential to assume role with `role_arn`.
-    pub fn role_arn(&mut self, v: &str) -> &mut Self {
+    pub fn role_arn(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.role_arn = Some(v.to_string())
         }
@@ -338,9 +352,18 @@ impl S3Builder {
     }
 
     /// Set external_id for this backend.
-    pub fn external_id(&mut self, v: &str) -> &mut Self {
+    pub fn external_id(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.external_id = Some(v.to_string())
+        }
+
+        self
+    }
+
+    /// Set role_session_name for this backend.
+    pub fn role_session_name(mut self, v: &str) -> Self {
+        if !v.is_empty() {
+            self.config.role_session_name = Some(v.to_string())
         }
 
         self
@@ -358,7 +381,7 @@ impl S3Builder {
     /// - `REDUCED_REDUNDANCY`
     /// - `STANDARD`
     /// - `STANDARD_IA`
-    pub fn default_storage_class(&mut self, v: &str) -> &mut Self {
+    pub fn default_storage_class(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.default_storage_class = Some(v.to_string())
         }
@@ -376,7 +399,7 @@ impl S3Builder {
     ///
     /// SSE related options should be set carefully to make them works.
     /// Please use `server_side_encryption_with_*` helpers if even possible.
-    pub fn server_side_encryption(&mut self, v: &str) -> &mut Self {
+    pub fn server_side_encryption(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.server_side_encryption = Some(v.to_string())
         }
@@ -387,13 +410,12 @@ impl S3Builder {
     /// Set server_side_encryption_aws_kms_key_id for this backend
     ///
     /// - If `server_side_encryption` set to `aws:kms`, and `server_side_encryption_aws_kms_key_id`
-    /// is not set, S3 will use aws managed kms key to encrypt data.
+    ///   is not set, S3 will use aws managed kms key to encrypt data.
     /// - If `server_side_encryption` set to `aws:kms`, and `server_side_encryption_aws_kms_key_id`
-    /// is a valid kms key id, S3 will use the provided kms key to encrypt data.
+    ///   is a valid kms key id, S3 will use the provided kms key to encrypt data.
     /// - If the `server_side_encryption_aws_kms_key_id` is invalid or not found, an error will be
-    /// returned.
-    /// - If `server_side_encryption` is not `aws:kms`, setting `server_side_encryption_aws_kms_key_id`
-    /// is a noop.
+    ///   returned.
+    /// - If `server_side_encryption` is not `aws:kms`, setting `server_side_encryption_aws_kms_key_id` is a noop.
     ///
     /// # Note
     ///
@@ -401,7 +423,7 @@ impl S3Builder {
     ///
     /// SSE related options should be set carefully to make them works.
     /// Please use `server_side_encryption_with_*` helpers if even possible.
-    pub fn server_side_encryption_aws_kms_key_id(&mut self, v: &str) -> &mut Self {
+    pub fn server_side_encryption_aws_kms_key_id(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.server_side_encryption_aws_kms_key_id = Some(v.to_string())
         }
@@ -419,7 +441,7 @@ impl S3Builder {
     ///
     /// SSE related options should be set carefully to make them works.
     /// Please use `server_side_encryption_with_*` helpers if even possible.
-    pub fn server_side_encryption_customer_algorithm(&mut self, v: &str) -> &mut Self {
+    pub fn server_side_encryption_customer_algorithm(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.server_side_encryption_customer_algorithm = Some(v.to_string())
         }
@@ -440,7 +462,7 @@ impl S3Builder {
     ///
     /// SSE related options should be set carefully to make them works.
     /// Please use `server_side_encryption_with_*` helpers if even possible.
-    pub fn server_side_encryption_customer_key(&mut self, v: &str) -> &mut Self {
+    pub fn server_side_encryption_customer_key(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.server_side_encryption_customer_key = Some(v.to_string())
         }
@@ -460,7 +482,7 @@ impl S3Builder {
     ///
     /// SSE related options should be set carefully to make them works.
     /// Please use `server_side_encryption_with_*` helpers if even possible.
-    pub fn server_side_encryption_customer_key_md5(&mut self, v: &str) -> &mut Self {
+    pub fn server_side_encryption_customer_key_md5(mut self, v: &str) -> Self {
         if !v.is_empty() {
             self.config.server_side_encryption_customer_key_md5 = Some(v.to_string())
         }
@@ -473,7 +495,7 @@ impl S3Builder {
     /// As known as: SSE-KMS
     ///
     /// NOTE: This function should not be used along with other `server_side_encryption_with_` functions.
-    pub fn server_side_encryption_with_aws_managed_kms_key(&mut self) -> &mut Self {
+    pub fn server_side_encryption_with_aws_managed_kms_key(mut self) -> Self {
         self.config.server_side_encryption = Some("aws:kms".to_string());
         self
     }
@@ -484,9 +506,9 @@ impl S3Builder {
     ///
     /// NOTE: This function should not be used along with other `server_side_encryption_with_` functions.
     pub fn server_side_encryption_with_customer_managed_kms_key(
-        &mut self,
+        mut self,
         aws_kms_key_id: &str,
-    ) -> &mut Self {
+    ) -> Self {
         self.config.server_side_encryption = Some("aws:kms".to_string());
         self.config.server_side_encryption_aws_kms_key_id = Some(aws_kms_key_id.to_string());
         self
@@ -497,7 +519,7 @@ impl S3Builder {
     /// As known as: SSE-S3
     ///
     /// NOTE: This function should not be used along with other `server_side_encryption_with_` functions.
-    pub fn server_side_encryption_with_s3_key(&mut self) -> &mut Self {
+    pub fn server_side_encryption_with_s3_key(mut self) -> Self {
         self.config.server_side_encryption = Some("AES256".to_string());
         self
     }
@@ -507,11 +529,7 @@ impl S3Builder {
     /// As known as: SSE-C
     ///
     /// NOTE: This function should not be used along with other `server_side_encryption_with_` functions.
-    pub fn server_side_encryption_with_customer_key(
-        &mut self,
-        algorithm: &str,
-        key: &[u8],
-    ) -> &mut Self {
+    pub fn server_side_encryption_with_customer_key(mut self, algorithm: &str, key: &[u8]) -> Self {
         self.config.server_side_encryption_customer_algorithm = Some(algorithm.to_string());
         self.config.server_side_encryption_customer_key = Some(BASE64_STANDARD.encode(key));
         self.config.server_side_encryption_customer_key_md5 =
@@ -523,12 +541,18 @@ impl S3Builder {
     ///
     /// # Warning
     ///
-    /// security token's lifetime is short and requires users to refresh in time.
-    pub fn security_token(&mut self, token: &str) -> &mut Self {
+    /// session token's lifetime is short and requires users to refresh in time.
+    pub fn session_token(mut self, token: &str) -> Self {
         if !token.is_empty() {
-            self.config.security_token = Some(token.to_string());
+            self.config.session_token = Some(token.to_string());
         }
         self
+    }
+
+    /// Set temporary credential used in AWS S3 connections
+    #[deprecated(note = "Please use `session_token` instead")]
+    pub fn security_token(self, token: &str) -> Self {
+        self.session_token(token)
     }
 
     /// Disable config load so that opendal will not load config from
@@ -538,7 +562,7 @@ impl S3Builder {
     ///
     /// - envs like `AWS_ACCESS_KEY_ID`
     /// - files like `~/.aws/config`
-    pub fn disable_config_load(&mut self) -> &mut Self {
+    pub fn disable_config_load(mut self) -> Self {
         self.config.disable_config_load = true;
         self
     }
@@ -547,14 +571,14 @@ impl S3Builder {
     ///
     /// This option is used to disable the default behavior of opendal
     /// to load credential from ec2 metadata, a.k.a, IMDSv2
-    pub fn disable_ec2_metadata(&mut self) -> &mut Self {
+    pub fn disable_ec2_metadata(mut self) -> Self {
         self.config.disable_ec2_metadata = true;
         self
     }
 
     /// Allow anonymous will allow opendal to send request without signing
     /// when credential is not loaded.
-    pub fn allow_anonymous(&mut self) -> &mut Self {
+    pub fn allow_anonymous(mut self) -> Self {
         self.config.allow_anonymous = true;
         self
     }
@@ -564,7 +588,7 @@ impl S3Builder {
     ///
     /// - By default, opendal will send API to `https://s3.us-east-1.amazonaws.com/bucket_name`
     /// - Enabled, opendal will send API to `https://bucket_name.s3.us-east-1.amazonaws.com`
-    pub fn enable_virtual_host_style(&mut self) -> &mut Self {
+    pub fn enable_virtual_host_style(mut self) -> Self {
         self.config.enable_virtual_host_style = true;
         self
     }
@@ -572,17 +596,17 @@ impl S3Builder {
     /// Disable stat with override so that opendal will not send stat request with override queries.
     ///
     /// For example, R2 doesn't support stat with `response_content_type` query.
-    pub fn disable_stat_with_override(&mut self) -> &mut Self {
+    pub fn disable_stat_with_override(mut self) -> Self {
         self.config.disable_stat_with_override = true;
         self
     }
 
-    /// Adding a customed credential load for service.
+    /// Adding a customized credential load for service.
     ///
-    /// If customed_credential_load has been set, we will ignore all other
+    /// If customized_credential_load has been set, we will ignore all other
     /// credential load methods.
-    pub fn customed_credential_load(&mut self, cred: Box<dyn AwsCredentialLoad>) -> &mut Self {
-        self.customed_credential_load = Some(cred);
+    pub fn customized_credential_load(mut self, cred: Box<dyn AwsCredentialLoad>) -> Self {
+        self.customized_credential_load = Some(cred);
         self
     }
 
@@ -592,7 +616,7 @@ impl S3Builder {
     ///
     /// This API is part of OpenDAL's Raw API. `HttpClient` could be changed
     /// during minor updates.
-    pub fn http_client(&mut self, client: HttpClient) -> &mut Self {
+    pub fn http_client(mut self, client: HttpClient) -> Self {
         self.http_client = Some(client);
         self
     }
@@ -662,7 +686,7 @@ impl S3Builder {
     }
 
     /// Set maximum batch operations of this backend.
-    pub fn batch_max_operations(&mut self, batch_max_operations: usize) -> &mut Self {
+    pub fn batch_max_operations(mut self, batch_max_operations: usize) -> Self {
         self.config.batch_max_operations = Some(batch_max_operations);
 
         self
@@ -673,7 +697,7 @@ impl S3Builder {
     ///
     /// Available options:
     /// - "crc32c"
-    pub fn checksum_algorithm(&mut self, checksum_algorithm: &str) -> &mut Self {
+    pub fn checksum_algorithm(mut self, checksum_algorithm: &str) -> Self {
         self.config.checksum_algorithm = Some(checksum_algorithm.to_string());
 
         self
@@ -797,20 +821,9 @@ impl S3Builder {
 
 impl Builder for S3Builder {
     const SCHEME: Scheme = Scheme::S3;
-    type Accessor = S3Backend;
+    type Config = S3Config;
 
-    fn from_map(map: HashMap<String, String>) -> Self {
-        let config = S3Config::deserialize(ConfigDeserializer::new(map))
-            .expect("config deserialize must succeed");
-
-        S3Builder {
-            config,
-            customed_credential_load: None,
-            http_client: None,
-        }
-    }
-
-    fn build(&mut self) -> Result<Self::Accessor> {
+    fn build(self) -> Result<impl Access> {
         debug!("backend build started: {:?}", &self);
 
         let root = normalize_root(&self.config.root.clone().unwrap_or_default());
@@ -885,15 +898,6 @@ impl Builder for S3Builder {
             }
         };
 
-        let client = if let Some(client) = self.http_client.take() {
-            client
-        } else {
-            HttpClient::new().map_err(|err| {
-                err.with_operation("Builder::build")
-                    .with_context("service", Scheme::S3)
-            })?
-        };
-
         // This is our current config.
         let mut cfg = AwsConfig::default();
         if !self.config.disable_config_load {
@@ -904,7 +908,7 @@ impl Builder for S3Builder {
             }
         }
 
-        if let Some(v) = self.config.region.take() {
+        if let Some(v) = self.config.region.clone() {
             cfg.region = Some(v);
         }
         if cfg.region.is_none() {
@@ -924,35 +928,50 @@ impl Builder for S3Builder {
         debug!("backend use endpoint: {endpoint}");
 
         // Setting all value from user input if available.
-        if let Some(v) = self.config.access_key_id.take() {
+        if let Some(v) = self.config.access_key_id {
             cfg.access_key_id = Some(v)
         }
-        if let Some(v) = self.config.secret_access_key.take() {
+        if let Some(v) = self.config.secret_access_key {
             cfg.secret_access_key = Some(v)
         }
-        if let Some(v) = self.config.security_token.take() {
+        if let Some(v) = self.config.session_token {
             cfg.session_token = Some(v)
         }
 
+        let client = if let Some(client) = self.http_client {
+            client
+        } else {
+            HttpClient::new().map_err(|err| {
+                err.with_operation("Builder::build")
+                    .with_context("service", Scheme::S3)
+            })?
+        };
+
         let mut loader: Option<Box<dyn AwsCredentialLoad>> = None;
-        // If customed_credential_load is set, we will use it.
-        if let Some(v) = self.customed_credential_load.take() {
+        // If customized_credential_load is set, we will use it.
+        if let Some(v) = self.customized_credential_load {
             loader = Some(v);
         }
 
         // If role_arn is set, we must use AssumeRoleLoad.
-        if let Some(role_arn) = self.config.role_arn.take() {
+        if let Some(role_arn) = self.config.role_arn {
             // use current env as source credential loader.
             let default_loader = AwsDefaultLoader::new(client.client(), cfg.clone());
 
             // Build the config for assume role.
-            let assume_role_cfg = AwsConfig {
+            let mut assume_role_cfg = AwsConfig {
                 region: Some(region.clone()),
                 role_arn: Some(role_arn),
                 external_id: self.config.external_id.clone(),
                 sts_regional_endpoints: "regional".to_string(),
                 ..Default::default()
             };
+
+            // override default role_session_name if set
+            if let Some(name) = self.config.role_session_name {
+                assume_role_cfg.role_session_name = name;
+            }
+
             let assume_role_loader = AwsAssumeRoleLoader::new(
                 client.client(),
                 assume_role_cfg,
@@ -987,7 +1006,7 @@ impl Builder for S3Builder {
             .config
             .batch_max_operations
             .unwrap_or(DEFAULT_BATCH_MAX_OPERATIONS);
-        debug!("backend build finished");
+
         Ok(S3Backend {
             core: Arc::new(S3Core {
                 bucket: bucket.to_string(),
@@ -1026,7 +1045,7 @@ impl Access for S3Backend {
     type BlockingWriter = ();
     type BlockingLister = ();
 
-    fn info(&self) -> AccessorInfo {
+    fn info(&self) -> Arc<AccessorInfo> {
         let mut am = AccessorInfo::default();
         am.set_scheme(Scheme::S3)
             .set_root(&self.core.root)
@@ -1084,7 +1103,7 @@ impl Access for S3Backend {
                 ..Default::default()
             });
 
-        am
+        am.into()
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
@@ -1093,7 +1112,16 @@ impl Access for S3Backend {
         let status = resp.status();
 
         match status {
-            StatusCode::OK => parse_into_metadata(path, resp.headers()).map(RpStat::new),
+            StatusCode::OK => {
+                let headers = resp.headers();
+                let mut meta = parse_into_metadata(path, headers)?;
+
+                if let Some(v) = parse_header_to_str(headers, "x-amz-version-id")? {
+                    meta.set_version(v);
+                }
+
+                Ok(RpStat::new(meta))
+            }
             _ => Err(parse_error(resp)),
         }
     }
@@ -1124,13 +1152,13 @@ impl Access for S3Backend {
         Ok((RpWrite::default(), w))
     }
 
-    async fn delete(&self, path: &str, _: OpDelete) -> Result<RpDelete> {
+    async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
         // This would delete the bucket, do not perform
         if self.core.root == "/" && path == "/" {
             return Ok(RpDelete::default());
         }
 
-        let resp = self.core.s3_delete_object(path).await?;
+        let resp = self.core.s3_delete_object(path, &args).await?;
 
         let status = resp.status();
 
@@ -1227,7 +1255,7 @@ impl Access for S3Backend {
                 // set the error kind and mark temporary if retryable
                 let (kind, retryable) =
                     parse_s3_error_code(i.code.as_str()).unwrap_or((ErrorKind::Unexpected, false));
-                let mut err: Error = Error::new(kind, &format!("{i:?}"));
+                let mut err: Error = Error::new(kind, format!("{i:?}"));
                 if retryable {
                     err = err.set_temporary();
                 }
@@ -1259,9 +1287,9 @@ mod tests {
 
         for (bucket, enable_virtual_host_style, expected) in bucket_cases {
             let mut b = S3Builder::default();
-            b.bucket(bucket);
+            b = b.bucket(bucket);
             if enable_virtual_host_style {
-                b.enable_virtual_host_style();
+                b = b.enable_virtual_host_style();
             }
             assert_eq!(b.is_bucket_valid(), expected)
         }
@@ -1279,10 +1307,9 @@ mod tests {
         ];
 
         for endpoint in &endpoint_cases {
-            let mut b = S3Builder::default();
-            b.bucket("test");
+            let mut b = S3Builder::default().bucket("test");
             if let Some(endpoint) = endpoint {
-                b.endpoint(endpoint);
+                b = b.endpoint(endpoint);
             }
 
             let endpoint = b.build_endpoint("us-east-2");
@@ -1290,11 +1317,11 @@ mod tests {
         }
 
         for endpoint in &endpoint_cases {
-            let mut b = S3Builder::default();
-            b.bucket("test");
-            b.enable_virtual_host_style();
+            let mut b = S3Builder::default()
+                .bucket("test")
+                .enable_virtual_host_style();
             if let Some(endpoint) = endpoint {
-                b.endpoint(endpoint);
+                b = b.endpoint(endpoint);
             }
 
             let endpoint = b.build_endpoint("us-east-2");

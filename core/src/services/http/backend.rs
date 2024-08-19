@@ -15,9 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fmt::Formatter;
+use std::sync::Arc;
 
 use http::header;
 use http::header::IF_MATCH;
@@ -27,13 +27,14 @@ use http::Response;
 use http::StatusCode;
 use log::debug;
 use serde::Deserialize;
+use serde::Serialize;
 
 use super::error::parse_error;
 use crate::raw::*;
 use crate::*;
 
 /// Config for Http service support.
-#[derive(Default, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 #[non_exhaustive]
 pub struct HttpConfig {
@@ -59,6 +60,16 @@ impl Debug for HttpConfig {
     }
 }
 
+impl Configurator for HttpConfig {
+    type Builder = HttpBuilder;
+    fn into_builder(self) -> Self::Builder {
+        HttpBuilder {
+            config: self,
+            http_client: None,
+        }
+    }
+}
+
 /// HTTP Read-only service support like [Nginx](https://www.nginx.com/) and [Caddy](https://caddyserver.com/).
 #[doc = include_str!("docs.md")]
 #[derive(Default)]
@@ -79,7 +90,7 @@ impl HttpBuilder {
     /// Set endpoint for http backend.
     ///
     /// For example: `https://example.com`
-    pub fn endpoint(&mut self, endpoint: &str) -> &mut Self {
+    pub fn endpoint(mut self, endpoint: &str) -> Self {
         self.config.endpoint = if endpoint.is_empty() {
             None
         } else {
@@ -92,7 +103,7 @@ impl HttpBuilder {
     /// set username for http backend
     ///
     /// default: no username
-    pub fn username(&mut self, username: &str) -> &mut Self {
+    pub fn username(mut self, username: &str) -> Self {
         if !username.is_empty() {
             self.config.username = Some(username.to_owned());
         }
@@ -102,7 +113,7 @@ impl HttpBuilder {
     /// set password for http backend
     ///
     /// default: no password
-    pub fn password(&mut self, password: &str) -> &mut Self {
+    pub fn password(mut self, password: &str) -> Self {
         if !password.is_empty() {
             self.config.password = Some(password.to_owned());
         }
@@ -112,7 +123,7 @@ impl HttpBuilder {
     /// set bearer token for http backend
     ///
     /// default: no access token
-    pub fn token(&mut self, token: &str) -> &mut Self {
+    pub fn token(mut self, token: &str) -> Self {
         if !token.is_empty() {
             self.config.token = Some(token.to_owned());
         }
@@ -120,7 +131,7 @@ impl HttpBuilder {
     }
 
     /// Set root path of http backend.
-    pub fn root(&mut self, root: &str) -> &mut Self {
+    pub fn root(mut self, root: &str) -> Self {
         self.config.root = if root.is_empty() {
             None
         } else {
@@ -136,7 +147,7 @@ impl HttpBuilder {
     ///
     /// This API is part of OpenDAL's Raw API. `HttpClient` could be changed
     /// during minor updates.
-    pub fn http_client(&mut self, client: HttpClient) -> &mut Self {
+    pub fn http_client(mut self, client: HttpClient) -> Self {
         self.http_client = Some(client);
         self
     }
@@ -144,19 +155,9 @@ impl HttpBuilder {
 
 impl Builder for HttpBuilder {
     const SCHEME: Scheme = Scheme::Http;
-    type Accessor = HttpBackend;
+    type Config = HttpConfig;
 
-    fn from_map(map: HashMap<String, String>) -> Self {
-        let config = HttpConfig::deserialize(ConfigDeserializer::new(map))
-            .expect("config deserialize must succeed");
-
-        HttpBuilder {
-            config,
-            http_client: None,
-        }
-    }
-
-    fn build(&mut self) -> Result<Self::Accessor> {
+    fn build(self) -> Result<impl Access> {
         debug!("backend build started: {:?}", &self);
 
         let endpoint = match &self.config.endpoint {
@@ -167,10 +168,10 @@ impl Builder for HttpBuilder {
             }
         };
 
-        let root = normalize_root(&self.config.root.take().unwrap_or_default());
+        let root = normalize_root(&self.config.root.unwrap_or_default());
         debug!("backend use root {}", root);
 
-        let client = if let Some(client) = self.http_client.take() {
+        let client = if let Some(client) = self.http_client {
             client
         } else {
             HttpClient::new().map_err(|err| {
@@ -190,7 +191,6 @@ impl Builder for HttpBuilder {
             auth = Some(format_authorization_by_bearer(token)?)
         }
 
-        debug!("backend build finished: {:?}", &self);
         Ok(HttpBackend {
             endpoint: endpoint.to_string(),
             authorization: auth,
@@ -228,7 +228,7 @@ impl Access for HttpBackend {
     type BlockingWriter = ();
     type BlockingLister = ();
 
-    fn info(&self) -> AccessorInfo {
+    fn info(&self) -> Arc<AccessorInfo> {
         let mut ma = AccessorInfo::default();
         ma.set_scheme(Scheme::Http)
             .set_root(&self.root)
@@ -242,10 +242,14 @@ impl Access for HttpBackend {
                 read_with_if_match: true,
                 read_with_if_none_match: true,
 
+                presign: !self.has_authorization(),
+                presign_read: !self.has_authorization(),
+                presign_stat: !self.has_authorization(),
+
                 ..Default::default()
             });
 
-        ma
+        ma.into()
     }
 
     async fn stat(&self, path: &str, args: OpStat) -> Result<RpStat> {
@@ -285,15 +289,47 @@ impl Access for HttpBackend {
             }
         }
     }
+
+    async fn presign(&self, path: &str, args: OpPresign) -> Result<RpPresign> {
+        if self.has_authorization() {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "Http doesn't support presigned request on backend with authorization",
+            ));
+        }
+
+        let req = match args.operation() {
+            PresignOperation::Stat(v) => self.http_head_request(path, v)?,
+            PresignOperation::Read(v) => self.http_get_request(path, BytesRange::default(), v)?,
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "Http doesn't support presigned write",
+                ))
+            }
+        };
+
+        let (parts, _) = req.into_parts();
+
+        Ok(RpPresign::new(PresignedRequest::new(
+            parts.method,
+            parts.uri,
+            parts.headers,
+        )))
+    }
 }
 
 impl HttpBackend {
-    pub async fn http_get(
+    pub fn has_authorization(&self) -> bool {
+        self.authorization.is_some()
+    }
+
+    pub fn http_get_request(
         &self,
         path: &str,
         range: BytesRange,
         args: &OpRead,
-    ) -> Result<Response<HttpBody>> {
+    ) -> Result<Request<Buffer>> {
         let p = build_rooted_abs_path(&self.root, path);
 
         let url = format!("{}{}", self.endpoint, percent_encode_path(&p));
@@ -316,12 +352,20 @@ impl HttpBackend {
             req = req.header(header::RANGE, range.to_header());
         }
 
-        let req = req.body(Buffer::new()).map_err(new_request_build_error)?;
+        req.body(Buffer::new()).map_err(new_request_build_error)
+    }
 
+    pub async fn http_get(
+        &self,
+        path: &str,
+        range: BytesRange,
+        args: &OpRead,
+    ) -> Result<Response<HttpBody>> {
+        let req = self.http_get_request(path, range, args)?;
         self.client.fetch(req).await
     }
 
-    async fn http_head(&self, path: &str, args: &OpStat) -> Result<Response<Buffer>> {
+    pub fn http_head_request(&self, path: &str, args: &OpStat) -> Result<Request<Buffer>> {
         let p = build_rooted_abs_path(&self.root, path);
 
         let url = format!("{}{}", self.endpoint, percent_encode_path(&p));
@@ -340,8 +384,11 @@ impl HttpBackend {
             req = req.header(header::AUTHORIZATION, auth.clone())
         }
 
-        let req = req.body(Buffer::new()).map_err(new_request_build_error)?;
+        req.body(Buffer::new()).map_err(new_request_build_error)
+    }
 
+    async fn http_head(&self, path: &str, args: &OpStat) -> Result<Response<Buffer>> {
+        let req = self.http_head_request(path, args)?;
         self.client.send(req).await
     }
 }

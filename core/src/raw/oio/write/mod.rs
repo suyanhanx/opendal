@@ -19,7 +19,6 @@ mod api;
 pub use api::BlockingWrite;
 pub use api::BlockingWriter;
 pub use api::Write;
-pub use api::WriteOperation;
 pub use api::Writer;
 
 mod multipart_write;
@@ -34,9 +33,6 @@ pub use append_write::AppendWriter;
 mod one_shot_write;
 pub use one_shot_write::OneShotWrite;
 pub use one_shot_write::OneShotWriter;
-
-mod chunked_write;
-pub use chunked_write::ChunkedWriter;
 
 mod range_write;
 pub use range_write::RangeWrite;
